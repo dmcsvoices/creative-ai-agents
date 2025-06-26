@@ -1,0 +1,30 @@
+# Core dependencies
+pyautogen>=0.2.0
+requests>=2.28.0
+tavily-python>=0.7.0
+
+# Database and data handling
+sqlite3  # Usually included with Python
+
+# Optional dependencies for enhanced functionality
+python-dotenv>=1.0.0  # For .env file support (optional)
+
+# Development dependencies (optional)
+pytest>=7.0.0
+black>=22.0.0
+flake8>=5.0.0
+
+# Note: The following are typically included with Python 3.8+:
+# - json
+# - logging
+# - os
+# - sys
+# - time
+# - datetime
+# - pathlib
+# - argparse
+# - fcntl (Unix/Linux only)
+# - re
+# - random
+# - sqlite3
+# - typing

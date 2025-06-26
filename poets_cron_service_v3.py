@@ -1,0 +1,820 @@
+#!/usr/bin/env python3
+"""
+Poets Generator Service v3.1 - Fixed Resource Usage
+Enhanced with efficient queue processing - NO GPU usage when queue is empty
+"""
+
+import os
+import sys
+import json
+import logging
+import time
+import argparse
+import requests
+import autogen
+import sqlite3
+import fcntl
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
+
+# Import tools from local directory first, fallback to API directory
+try:
+    # Try local tools.py first (in poets-cron-service directory)
+    from tools import (
+        save_text_to_file, 
+        save_to_sqlite_database, 
+        query_database_content, 
+        get_database_stats,
+        tavily_research_assistant
+    )
+    print("✅ Successfully imported tools from local directory")
+except ImportError as e:
+    print(f"⚠️ Local tools import failed: {e}")
+    # Fallback to API directory
+    sys.path.append('/Volumes/Tikbalang2TB/Users/tikbalang/anthonys-musings-api')
+    try:
+        from tools import (
+            save_text_to_file, 
+            save_to_sqlite_database, 
+            query_database_content, 
+            get_database_stats,
+            tavily_research_assistant
+        )
+        print("✅ Successfully imported tools from API directory (fallback)")
+    except ImportError as e2:
+        print(f"❌ ERROR: Could not import tools from either location:")
+        print(f"   Local: {e}")
+        print(f"   API: {e2}")
+        print("Make sure tools.py exists in current directory or API directory")
+        sys.exit(1)
+
+
+class ProcessLock:
+    """Simple file-based process lock to prevent concurrent executions"""
+    
+    def __init__(self, lock_file: str, timeout_minutes: int = 60):
+        self.lock_file = lock_file
+        self.timeout_minutes = timeout_minutes
+        self.lock_fd = None
+        
+    def acquire(self) -> bool:
+        """Attempt to acquire the lock"""
+        try:
+            # Check for stale lock files
+            self._cleanup_stale_lock()
+            
+            # Try to create and lock the file
+            self.lock_fd = os.open(self.lock_file, os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+            
+            # Write process info
+            lock_info = {
+                "pid": os.getpid(),
+                "started_at": datetime.now().isoformat(),
+                "timeout_at": (datetime.now() + timedelta(minutes=self.timeout_minutes)).isoformat()
+            }
+            os.write(self.lock_fd, json.dumps(lock_info).encode())
+            os.fsync(self.lock_fd)
+            
+            return True
+            
+        except FileExistsError:
+            # Lock file exists - another process is running
+            return False
+        except Exception as e:
+            print(f"Error acquiring lock: {e}")
+            return False
+    
+    def release(self):
+        """Release the lock"""
+        try:
+            if self.lock_fd is not None:
+                os.close(self.lock_fd)
+                self.lock_fd = None
+            
+            if os.path.exists(self.lock_file):
+                os.unlink(self.lock_file)
+                
+        except Exception as e:
+            print(f"Error releasing lock: {e}")
+    
+    def _cleanup_stale_lock(self):
+        """Remove stale lock files from crashed processes"""
+        if not os.path.exists(self.lock_file):
+            return
+            
+        try:
+            with open(self.lock_file, 'r') as f:
+                lock_info = json.load(f)
+            
+            timeout_str = lock_info.get('timeout_at')
+            if timeout_str:
+                timeout_time = datetime.fromisoformat(timeout_str)
+                if datetime.now() > timeout_time:
+                    # Lock is stale, remove it
+                    os.unlink(self.lock_file)
+                    print(f"Removed stale lock file (timed out)")
+                    
+        except Exception as e:
+            # If we can't read the lock file, assume it's corrupt and remove it
+            try:
+                os.unlink(self.lock_file)
+                print(f"Removed corrupt lock file")
+            except:
+                pass
+    
+    def __enter__(self):
+        """Context manager entry"""
+        if not self.acquire():
+            raise RuntimeError("Could not acquire process lock - another generation may be running")
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit"""
+        self.release()
+
+
+class PoetsService:
+    """Main service class for automated content generation"""
+    
+    def __init__(self, config_path: str):
+        self.config_path = config_path
+        self.config = self.load_config()
+        self.setup_logging()
+        self.logger = logging.getLogger(__name__)
+        self.lock_file = os.path.join(os.path.dirname(config_path), "poets_generation.lock")
+        
+    def load_config(self) -> Dict[str, Any]:
+        """Load configuration from JSON file"""
+        try:
+            with open(self.config_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"ERROR: Failed to load config from {self.config_path}: {e}")
+            sys.exit(1)
+            
+    def setup_logging(self):
+        """Setup logging configuration"""
+        log_config = self.config.get('logging', {})
+        log_file = log_config.get('file', 'logs/poets_cron.log')
+        log_level = getattr(logging, log_config.get('level', 'INFO'))
+        
+        # Create logs directory if it doesn't exist
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        
+        # Configure logging
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ]
+        )
+
+    def get_database_connection(self):
+        """Get database connection"""
+        db_path = self.config['database']['path']
+        return sqlite3.connect(db_path)
+
+    def get_unprocessed_prompts(self) -> List[Dict]:
+        """Get unprocessed prompts from the database queue"""
+        try:
+            conn = self.get_database_connection()
+            cursor = conn.cursor()
+            
+            # Check if prompts table exists
+            cursor.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='prompts'
+            """)
+            
+            if not cursor.fetchone():
+                self.logger.info("No prompts table found - creating it")
+                self.create_prompts_table(cursor)
+                conn.commit()
+                conn.close()
+                return []
+            
+            # Get unprocessed prompts ordered by priority and creation time
+            cursor.execute("""
+                SELECT id, prompt_text, prompt_type, priority, metadata, created_at
+                FROM prompts 
+                WHERE status = 'unprocessed'
+                ORDER BY priority ASC, created_at ASC
+                LIMIT 5
+            """)
+            
+            prompts = []
+            for row in cursor.fetchall():
+                metadata = json.loads(row[4]) if row[4] else {}
+                prompts.append({
+                    'id': row[0],
+                    'prompt_text': row[1],
+                    'prompt_type': row[2],
+                    'priority': row[3],
+                    'metadata': metadata,
+                    'created_at': row[5]
+                })
+            
+            conn.close()
+            return prompts
+            
+        except Exception as e:
+            self.logger.error(f"Error getting unprocessed prompts: {e}")
+            return []
+
+    def create_prompts_table(self, cursor):
+        """Create the prompts table if it doesn't exist"""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt_text TEXT NOT NULL,
+                prompt_type TEXT DEFAULT 'text',
+                status TEXT DEFAULT 'unprocessed',
+                priority INTEGER DEFAULT 5,
+                config_name TEXT,
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                processed_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                output_reference INTEGER,
+                error_message TEXT,
+                processing_duration INTEGER
+            )
+        """)
+
+    def update_prompt_status(self, prompt_id: int, status: str, error_message: Optional[str] = None):
+        """Update the status of a prompt in the database"""
+        try:
+            conn = self.get_database_connection()
+            cursor = conn.cursor()
+            
+            now = datetime.now().isoformat()
+            
+            if status == 'processing':
+                cursor.execute("""
+                    UPDATE prompts 
+                    SET status = ?, processed_at = ?
+                    WHERE id = ?
+                """, (status, now, prompt_id))
+            elif status == 'completed':
+                cursor.execute("""
+                    UPDATE prompts 
+                    SET status = ?, completed_at = ?
+                    WHERE id = ?
+                """, (status, now, prompt_id))
+            elif status == 'failed':
+                cursor.execute("""
+                    UPDATE prompts 
+                    SET status = ?, completed_at = ?, error_message = ?
+                    WHERE id = ?
+                """, (status, now, error_message, prompt_id))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            self.logger.error(f"Error updating prompt status: {e}")
+        
+    def check_environment(self) -> bool:
+        """Check required environment variables"""
+        required_vars = self.config.get('environment', {}).get('required_vars', [])
+        
+        # Add TVLY_API_KEY to required vars for Tavily functionality
+        if 'TVLY_API_KEY' not in required_vars:
+            required_vars.append('TVLY_API_KEY')
+        
+        missing_vars = []
+        
+        for var in required_vars:
+            if not os.getenv(var):
+                missing_vars.append(var)
+                
+        if missing_vars:
+            self.logger.error(f"Missing required environment variables: {missing_vars}")
+            self.logger.error("Note: TVLY_API_KEY is required for web research functionality")
+            return False
+            
+        # Log successful environment check
+        self.logger.info(f"Environment check passed: {len(required_vars)} variables found")
+        return True
+        
+    def get_base_url(self, backend_type: str) -> Optional[str]:
+        """Get base URL for specified backend type"""
+        if backend_type == 'lms':
+            return os.getenv("NGROKURL")
+        elif backend_type == 'oll':
+            return os.getenv("WIFI_LLM_URL")
+        else:
+            manual_url = self.config.get('backend', {}).get('manual_url')
+            return manual_url
+            
+    def validate_models(self, base_url: str) -> Tuple[bool, List[str]]:
+        """Validate that required models are available"""
+        try:
+            models_endpoint = f"{base_url}/models"
+            response = requests.get(models_endpoint, timeout=30)
+            
+            if response.status_code != 200:
+                return False, [f"Failed to fetch models from {models_endpoint}"]
+                
+            available_models = [model['id'] for model in response.json().get('data', [])]
+            
+            # Check primary models
+            required_models = [
+                self.config['models']['local1'],
+                self.config['models']['local2'], 
+                self.config['models']['local3']
+            ]
+            
+            missing_models = [model for model in required_models if model not in available_models]
+            
+            if missing_models:
+                return False, [f"Missing models: {missing_models}"]
+                
+            return True, []
+            
+        except Exception as e:
+            return False, [f"Error validating models: {str(e)}"]
+            
+    def create_config_lists(self, base_url: str) -> Dict[str, List[Dict]]:
+        """Create configuration lists for autogen"""
+        models = self.config['models']
+        
+        config_lists = {
+            'local1': [{
+                "model": models['local1'],
+                "base_url": base_url,
+                "api_key": os.getenv("DEEPSEEK_API_KEY", "dummy-key")
+            }],
+            'local2': [{
+                "model": models['local2'],
+                "base_url": base_url,
+                "api_key": os.getenv("DEEPSEEK_API_KEY", "dummy-key")
+            }],
+            'local3': [{
+                "model": models['local3'],
+                "base_url": base_url,
+                "api_key": os.getenv("DEEPSEEK_API_KEY", "dummy-key")
+            }]
+        }
+        
+        return config_lists
+        
+    def create_agents(self, config_lists: Dict[str, List[Dict]], prompt_data: Dict = None) -> List[autogen.Agent]:
+        """Create autogen agents from configuration"""
+        agents = []
+        
+        # Customize system messages based on prompt type if provided
+        prompt_type = prompt_data.get('prompt_type', 'text') if prompt_data else 'text'
+        
+        for agent_config in self.config['agents']:
+            if agent_config['type'] == 'UserProxyAgent':
+                system_message = agent_config['system_message']
+                if prompt_data:
+                    system_message += f" Focus on {prompt_type} content generation."
+                # Add explicit tool availability notice
+                system_message += " You have access to web_research_tool() for current information and research."
+                
+                agent = autogen.UserProxyAgent(
+                    name=agent_config['name'],
+                    system_message=system_message,
+                    code_execution_config=agent_config.get('code_execution_config', {
+                        "last_n_messages": 2,
+                        "work_dir": self.config['processing']['output_directory'],
+                        "use_docker": False,
+                    }),
+                    human_input_mode=agent_config.get('human_input_mode', 'TERMINATE'),
+                )
+            else:
+                config_assignment = agent_config.get('config_assignment', 'local1')
+                llm_config = None
+                
+                if config_assignment in config_lists:
+                    llm_config = {"config_list": config_lists[config_assignment]}
+                
+                system_message = agent_config['system_message']
+                if prompt_data:
+                    metadata = prompt_data.get('metadata', {})
+                    style = metadata.get('style')
+                    tone = metadata.get('tone')
+                    if style or tone:
+                        system_message += f" Create {prompt_type} content"
+                        if style:
+                            system_message += f" in {style} style"
+                        if tone:
+                            system_message += f" with a {tone} tone"
+                        system_message += "."
+                # Add explicit tool availability notice for AssistantAgents
+                system_message += " You have access to web_research_tool() for researching current information."
+                
+                agent = autogen.AssistantAgent(
+                    name=agent_config['name'],
+                    system_message=system_message,
+                    llm_config=llm_config,
+                )
+            
+            agents.append(agent)
+            
+            # Register database functions for agents with file save capability
+            if agent_config.get('has_file_save_function', False):
+                self.register_agent_functions(agent, agent_config['name'], prompt_data)
+                
+        return agents
+        
+    def register_agent_functions(self, agent, agent_name: str, prompt_data: Dict = None):
+        """Register file save and database functions for an agent"""
+        
+        # File save function
+        def save_file_function(content: str, folder: Optional[str] = None) -> Tuple[str, str]:
+            return save_text_to_file(content, self.config['processing']['output_directory'])
+        
+        # Database save function
+        def save_to_database(
+            content: str, 
+            title: Optional[str] = None,
+            content_type: Optional[str] = None,
+            tags: Optional[List[str]] = None,
+            publication_status: str = "ready",
+            notes: Optional[str] = None
+        ) -> Tuple[str, int]:
+            # Use prompt type as default content type
+            if not content_type and prompt_data:
+                content_type = prompt_data.get('prompt_type', 'text')
+                if content_type not in ['poetry', 'prose', 'dialogue', 'erotica', 'satire', 'political', 'fragment']:
+                    content_type = 'prose'  # Default fallback
+            
+            prompt_note = ""
+            if prompt_data:
+                prompt_note = f"Generated from prompt #{prompt_data.get('id', 'unknown')}. "
+                metadata = prompt_data.get('metadata', {})
+                if metadata:
+                    prompt_note += f"Style: {metadata.get('style', 'auto')}, Tone: {metadata.get('tone', 'natural')}. "
+            
+            return save_to_sqlite_database(
+                content=content,
+                db_path=self.config['database']['path'],
+                title=title,
+                content_type=content_type,
+                tags=tags,
+                publication_status=publication_status,
+                notes=f"{prompt_note}Generated by {agent_name} (automated). {notes or ''}"
+            )
+        
+        # Database query function
+        def query_database(
+            search_query: Optional[str] = None,
+            content_type: Optional[str] = None,
+            limit: int = 5
+        ) -> str:
+            return query_database_content(
+                db_path=self.config['database']['path'],
+                search_query=search_query,
+                content_type=content_type,
+                limit=limit
+            )
+        
+        # Database stats function
+        def get_stats() -> str:
+            return get_database_stats(self.config['database']['path'])
+        
+        # Web research tool for current information
+        def web_research_tool(
+            query: str,
+            search_type: str = "web_search",
+            search_depth: str = "advanced",
+            max_results: int = 3
+        ) -> Tuple[str, str]:
+            """
+            Research current information and events using web search.
+            
+            Args:
+                query: What to research (e.g., "latest AI developments", "current weather in Paris")
+                search_type: "web_search", "qna_search", or "context_search"
+                search_depth: "basic" or "advanced" (advanced recommended for creative work)
+                max_results: Number of sources to check (1-10, default: 3 for focused results)
+                
+            Returns:
+                Tuple[str, str]: (status_message, research_content)
+                
+            Examples:
+                - web_research_tool("latest technology trends", "web_search")
+                - web_research_tool("What happened in Gaza this week?", "qna_search")
+                - web_research_tool("climate change recent developments", "context_search")
+            """
+            # Log research activity
+            self.logger.info(f"🔍 {agent_name} researching: '{query}' (type: {search_type}, depth: {search_depth})")
+            
+            try:
+                status, content = tavily_research_assistant(
+                    query=query,
+                    search_type=search_type,
+                    search_depth=search_depth,
+                    max_results=max_results
+                )
+                
+                if status.startswith("✅"):
+                    self.logger.info(f"✅ {agent_name} research successful: {len(content)} chars received")
+                    # Log a preview of the research content
+                    preview = content[:150].replace('\n', ' ') + "..." if len(content) > 150 else content
+                    self.logger.info(f"📝 Research preview: {preview}")
+                else:
+                    self.logger.warning(f"⚠️ {agent_name} research failed: {status}")
+                
+                return status, content
+                
+            except Exception as e:
+                error_msg = f"❌ Research error for {agent_name}: {str(e)}"
+                self.logger.error(error_msg)
+                return error_msg, ""
+        
+        # Register functions based on agent type
+        if isinstance(agent, autogen.UserProxyAgent):
+            # UserProxyAgent: Only execution functions
+            self.logger.info(f"⚙️ Registering execution functions for {agent_name} (UserProxyAgent)")
+            agent.register_for_execution()(save_file_function)
+            agent.register_for_execution()(save_to_database)
+            agent.register_for_execution()(query_database)
+            agent.register_for_execution()(get_stats)
+            agent.register_for_execution()(web_research_tool)
+            self.logger.info(f"✅ Execution registration complete for {agent_name}")
+            
+        elif isinstance(agent, autogen.AssistantAgent):
+            # AssistantAgent: Only LLM functions
+            self.logger.info(f"🤖 Registering LLM functions for {agent_name} (AssistantAgent)")
+            agent.register_for_llm(description="Save text content to timestamped file")(save_file_function)
+            agent.register_for_llm(description="Save content to Anthony's Musings database with intelligent analysis")(save_to_database)
+            agent.register_for_llm(description="Query Anthony's Musings database for existing content")(query_database)
+            agent.register_for_llm(description="Get statistics about Anthony's Musings database content")(get_stats)
+            
+            # Web research tool for AI agents
+            agent.register_for_llm(description="""Research current information and events using web search.
+            Use this tool to get up-to-date information about any topic for creative writing.
+            Perfect for current events, recent developments, trending topics, or fact-checking.
+            Returns clean, focused information ready to incorporate into creative writing.
+            
+            IMPORTANT: search_type must be one of: "web_search", "qna_search", or "context_search"
+            - Use "web_search" for general research and current events
+            - Use "qna_search" for specific questions 
+            - Use "context_search" for detailed background information
+            
+            Examples:
+            - web_research_tool("latest AI developments", "web_search") - for tech-themed writing
+            - web_research_tool("current political events", "web_search") - for satirical pieces  
+            - web_research_tool("recent cultural trends", "qna_search") - for contemporary references
+            - web_research_tool("breaking news today", "web_search") - for current event inspiration
+            - web_research_tool("weather in Paris", "context_search") - for location-specific details
+            
+            Always use this when you need current, real-world information for your writing.""")(web_research_tool)
+            self.logger.info(f"✅ LLM registration complete for {agent_name} (including web_research_tool)")
+            
+        else:
+            self.logger.warning(f"⚠️ Unknown agent type for {agent_name}: {type(agent).__name__}")
+    
+    def run_generation_session(self, base_url: str, prompt_data: Dict) -> bool:
+        """Run a content generation session for a specific prompt"""
+        try:
+            prompt_id = prompt_data['id']
+            prompt_text = prompt_data['prompt_text']
+            prompt_type = prompt_data.get('prompt_type', 'text')
+            
+            self.logger.info(f"Starting generation for prompt #{prompt_id}: {prompt_text[:100]}...")
+            
+            # Update status to processing
+            self.update_prompt_status(prompt_id, 'processing')
+            
+            # Create configuration lists
+            config_lists = self.create_config_lists(base_url)
+            
+            # Create agents with prompt context
+            agents = self.create_agents(config_lists, prompt_data)
+            
+            if len(agents) < 2:
+                self.logger.error("Need at least 2 agents to run group chat")
+                return False
+            
+            # Build enhanced prompt with metadata
+            enhanced_prompt = prompt_text
+            metadata = prompt_data.get('metadata', {})
+            
+            # Add style/tone/length hints for the AI agents
+            metadata_hints = []
+            if metadata.get('style'): metadata_hints.append(f"Style: {metadata['style']}")
+            if metadata.get('tone'): metadata_hints.append(f"Tone: {metadata['tone']}")  
+            if metadata.get('length'): metadata_hints.append(f"Length: {metadata['length']}")
+            if metadata.get('collaboration_mode') and metadata['collaboration_mode'] != 'standard':
+                metadata_hints.append(f"Mode: {metadata['collaboration_mode']}")
+            
+            if metadata_hints:
+                enhanced_prompt += f" ({', '.join(metadata_hints)})"
+            
+            # Setup group chat
+            groupchat = autogen.GroupChat(
+                agents=agents,
+                messages=[f"Create {prompt_type} content based on this prompt: {enhanced_prompt}"],
+                max_round=self.config['processing'].get('max_rounds', 20)
+            )
+            
+            # Get manager config
+            manager_config_assignment = self.config.get('group_chat_manager', {}).get('config_assignment', 'local3')
+            manager_llm_config = None
+            
+            if manager_config_assignment in config_lists:
+                manager_llm_config = {"config_list": config_lists[manager_config_assignment]}
+            
+            manager = autogen.GroupChatManager(
+                groupchat=groupchat,
+                llm_config=manager_llm_config
+            )
+            
+            # Start the chat
+            agents[0].initiate_chat(manager, message=enhanced_prompt)
+            
+            # Mark as completed
+            self.update_prompt_status(prompt_id, 'completed')
+            self.logger.info(f"Generation completed successfully for prompt #{prompt_id}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error in generation session: {str(e)}")
+            self.update_prompt_status(prompt_id, 'failed', str(e))
+            return False
+    
+    def test_configuration(self) -> bool:
+        """Test the service configuration"""
+        self.logger.info("Testing service configuration...")
+        
+        # Check environment
+        if not self.check_environment():
+            return False
+        
+        # Test primary backend
+        backend_config = self.config.get('backend', {})
+        primary_backend = backend_config.get('type', 'oll')
+        base_url = self.get_base_url(primary_backend)
+        
+        if not base_url:
+            self.logger.error(f"No base URL available for backend type: {primary_backend}")
+            return False
+        
+        self.logger.info(f"Testing primary backend: {primary_backend} ({base_url})")
+        
+        # Validate models
+        if self.config['processing'].get('validate_models_on_startup', True):
+            valid, errors = self.validate_models(base_url)
+            if not valid:
+                self.logger.error(f"Model validation failed: {errors}")
+                return False
+        
+        # Test database access
+        db_path = self.config['database']['path']
+        if not os.path.exists(db_path):
+            self.logger.error(f"Database not found at: {db_path}")
+            return False
+        
+        self.logger.info("Configuration test passed!")
+        return True
+    
+    def run_queue_processor(self):
+        """Process unprocessed prompts from the queue - FIXED VERSION"""
+        self.logger.info("Starting queue processor...")
+        
+        # Use process lock to prevent concurrent execution
+        try:
+            with ProcessLock(self.lock_file, timeout_minutes=45):
+                self.logger.info("Acquired process lock - checking for unprocessed prompts")
+                
+                # 🔥 FIX: Check for prompts FIRST - before any expensive operations
+                prompts = self.get_unprocessed_prompts()
+                
+                if not prompts:
+                    self.logger.info("No unprocessed prompts found - exiting without model validation")
+                    return  # ✅ Early exit - no GPU usage!
+                
+                self.logger.info(f"Found {len(prompts)} unprocessed prompts - proceeding with validation")
+                
+                # Only check environment and models if we have work to do
+                if not self.check_environment():
+                    self.logger.error("Environment check failed")
+                    return
+                
+                # Determine backend URL
+                backend_config = self.config.get('backend', {})
+                primary_backend = backend_config.get('type', 'oll')
+                base_url = self.get_base_url(primary_backend)
+                
+                if not base_url:
+                    self.logger.error(f"No base URL available for backend type: {primary_backend}")
+                    return
+                
+                # 🔥 FIX: Only validate models if we have prompts to process
+                if self.config['processing'].get('validate_models_on_startup', True):
+                    self.logger.info("Validating models for active prompt processing...")
+                    valid, errors = self.validate_models(base_url)
+                    if not valid:
+                        self.logger.error(f"Model validation failed: {errors}")
+                        return
+                
+                # Process each prompt
+                for prompt in prompts:
+                    self.logger.info(f"Processing prompt #{prompt['id']}: {prompt['prompt_text'][:50]}...")
+                    success = self.run_generation_session(base_url, prompt)
+                    
+                    if success:
+                        self.logger.info(f"Successfully processed prompt #{prompt['id']}")
+                    else:
+                        self.logger.error(f"Failed to process prompt #{prompt['id']}")
+                    
+                    # Small delay between prompts to avoid overwhelming the system
+                    time.sleep(2)
+                
+                self.logger.info("Queue processing completed")
+                
+        except RuntimeError as e:
+            self.logger.info(f"Skipping execution: {e}")
+        except Exception as e:
+            self.logger.error(f"Error in queue processor: {e}")
+
+    def run_service(self):
+        """Main service execution - for manual/direct prompts"""
+        self.logger.info(f"Starting {self.config['service_info']['name']} v{self.config['service_info']['version']}")
+        
+        # Check environment
+        if not self.check_environment():
+            sys.exit(1)
+        
+        # Determine backend URL
+        backend_config = self.config.get('backend', {})
+        primary_backend = backend_config.get('type', 'oll')
+        base_url = self.get_base_url(primary_backend)
+        
+        if not base_url:
+            self.logger.error(f"No base URL available for backend type: {primary_backend}")
+            sys.exit(1)
+        
+        # Validate models if required
+        if self.config['processing'].get('validate_models_on_startup', True):
+            valid, errors = self.validate_models(base_url)
+            if not valid:
+                self.logger.error(f"Model validation failed: {errors}")
+                sys.exit(1)
+        
+        # Generate a random prompt for testing
+        import random
+        test_prompts = [
+            "Write a short poem about the intersection of technology and human emotion",
+            "Create a dialogue between two characters discussing the nature of creativity",
+            "Write a brief prose piece about a moment of unexpected beauty"
+        ]
+        
+        test_prompt_data = {
+            'id': 999,
+            'prompt_text': random.choice(test_prompts),
+            'prompt_type': 'text',
+            'metadata': {}
+        }
+        
+        # Run generation session
+        success = self.run_generation_session(base_url, test_prompt_data)
+        
+        if success:
+            self.logger.info("Service execution completed successfully")
+        else:
+            self.logger.error("Service execution failed")
+            sys.exit(1)
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(description='Poets Generator Service v3.1')
+    parser.add_argument('config_file', nargs='?', default='poets_cron_config.json',
+                       help='Configuration file path')
+    parser.add_argument('--test', action='store_true',
+                       help='Test configuration and exit')
+    parser.add_argument('--queue', action='store_true',
+                       help='Process the prompt queue (for LaunchAgent)')
+    
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.config_file):
+        print(f"ERROR: Configuration file not found: {args.config_file}")
+        sys.exit(1)
+    
+    # Create service instance
+    service = PoetsService(args.config_file)
+    
+    if args.test:
+        # Run configuration test
+        success = service.test_configuration()
+        sys.exit(0 if success else 1)
+    elif args.queue:
+        # Process the queue (for LaunchAgent)
+        service.run_queue_processor()
+    else:
+        # Run the service with a test prompt
+        service.run_service()
+
+
+if __name__ == "__main__":
+    main()
