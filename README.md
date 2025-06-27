@@ -1,4 +1,4 @@
-# Poets Service Clean
+# Creative AI Agents
 
 An automated content generation service that uses AI agents to create poetry, prose, dialogue, and other creative writing. Built with AutoGen and designed to work with local LLM backends.
 
