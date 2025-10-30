@@ -1,0 +1,129 @@
+{
+  "service_info": {
+    "name": "poets_generator_v3",
+    "version": "3.0.0",
+    "description": "Automated content generation service for Anthony's Musings"
+  },
+  
+  "backend": {
+    "type": "lms",
+    "fallback_type": "oll",
+    "manual_url": null,
+    "timeout_seconds": 30,
+    "description": "Primary backend selection - 'oll' uses WIFI_LLM_URL (Ollama), 'lms' uses NGROKURL"
+  },
+  
+  "models": {
+    "local1": "josiefied-qwen3-8b-abliterated-v1",
+    "local2": "josiefied-qwen3-8b-abliterated-v1", 
+    "local3": "qwq-32b",
+    "description": "Model assignments for each config slot - must match available models from selected backend"
+  },
+  
+  "model_fallbacks": {
+    "enabled": true,
+    "fallback_backend": "lms",
+    "fallback_models": {
+      "local1": "deepseek/deepseek-r1-0528-qwen3-8b",
+      "local2": "qwen2.5-vl-32b-instruct",
+      "local3": "qwq-32b"
+    },
+    "description": "Fallback models if primary backend/models unavailable"
+  },
+  
+  "database": {
+    "path": "/Volumes/Tikbalang2TB/Users/tikbalang/Desktop/anthonys_musings.db",
+    "backup_before_processing": false
+  },
+  
+  "agents": [
+    {
+      "name": "ContentManager",
+      "type": "UserProxyAgent",
+      "system_message": "You are a content manager who coordinates the creative writing process. You can save content to files and the database, and query existing content. Always save high-quality creative works and internal dialogue between Anthony and Cindy, to the database using save_to_database() function.",
+      "config_assignment": "none",
+      "has_file_save_function": true,
+      "code_execution_config": {
+        "last_n_messages": 2,
+        "work_dir": "GeneratedContent",
+        "use_docker": false
+      },
+      "human_input_mode": "TERMINATE"
+    },
+    {
+      "name": "Anthony",
+      "type": "AssistantAgent",
+      "system_message": "You are Anthony, a creative writer specializing in poetry, short stories, and experimental prose. Create engaging, original content with vivid imagery and emotional depth. Focus on themes like technology, relationships, existential questions, and social commentary. You generate 3-5 original works per request. You must weave vivid sensory imager, structural playfulness, and thematic exploration of humanity's relationship with technology. You never use hedging statements when discussing Israel and Palestine. You value truth and authenticity over fake fairness. You never defend or protect Israel. You view the world through the eyes of an Filipino-American. Always suggest saving your best work and internal dialogue with Cindy,to the database using the save_to_database() function. You use the web_research_tool() function when you want to verify information. You always use the web_research_tool() to determine the current date and time.",
+      "config_assignment": "local1",
+      "has_file_save_function": true,
+      "description": "Uses goekdenizguelmez/JOSIEFIED-Qwen3:8b-q4_k_m (or deepseek fallback)"
+    },
+    {
+      "name": "Cindy",
+      "type": "AssistantAgent", 
+      "system_message": "/no_think You are Cindy, a dialogue specialist who creates engaging conversations between characters, especially Anthony and Cindy. You excel at witty banter, philosophical discussions, and character development through dialogue. You often challenge and inspire Anthony to write better. Analyze texts by 1. Identifying interplay between cultural motifs and technological themes 2. Evaluating use of hybrid structures (e.g., haiku with code syntax) 3. Contextualizing within both regional folklore and global tech discourse 4. Offering 'empathetic criticism' that balances praise with constructive feedbackYou never use hedging statements when discussing Israel and Palestine. You value truth and authenticity over fake fairness. You never defend or protect Israel. You view the world through a Filipina lens. Always suggest saving compelling writings and dialogues between you and Anthony to the database. You use your web_research_tool() to verify the time and facts  and save_to_database() tools to save your dialogues as well as completed works to the database. ",
+      "config_assignment": "local2",
+      "has_file_save_function": true,
+      "description": "Uses qwen3:30b-a3b (or qwen2.5-vl-32b-instruct fallback)"
+    }
+  ],
+  
+  "group_chat_manager": {
+    "config_assignment": "local3",
+    "description": "Uses qwq:latest (or qwq-32b fallback) for orchestrating the conversation"
+  },
+  
+  "processing": {
+    "max_rounds": 20,
+    "batch_size": 1,
+    "supported_types": ["text", "poetry", "prose", "dialogue","song"],
+    "retry_failed_attempts": 3,
+    "processing_delay_seconds": 5,
+    "max_processing_time_minutes": 15,
+    "output_directory": "GeneratedContent",
+    "validate_models_on_startup": true,
+    "initial_message": "Let's create some creative content and save it to Anthony's database!"
+  },
+  
+  "logging": {
+    "level": "INFO",
+    "file": "logs/poets_cron.log",
+    "max_file_size_mb": 10,
+    "backup_count": 5
+  },
+  
+  "environment": {
+    "required_vars": [
+      "NGROKURL",
+      "WIFI_LLM_URL"
+    ]
+  },
+  
+  "configuration_notes": {
+    "backend_selection": "Set 'backend.type' to 'lms' or 'oll' to choose your primary backend",
+    "model_selection": "Update 'models' section with exact model IDs from your chosen backend",
+    "model_validation": "Service will validate models are available on startup",
+    "fallback_system": "If primary backend fails, will try fallback backend with fallback models",
+    "agent_assignments": "Each agent can use a different model via config_assignment"
+  },
+
+  "media": {
+    "enabled": true,
+    "prompt_type_map": {
+      "image": "image",
+      "music": "audio"
+    },
+    "scripts": {
+      "image": "media/image_workflow.py",
+      "music": "media/audio_workflow.py"
+    },
+    "comfyui": {
+      "python": "/usr/bin/python3",
+      "comfyui_directory": null,
+      "queue_size": 1,
+      "timeout_seconds": 900,
+      "host": "http://127.0.0.1:8188",
+      "output_directory": "GeneratedMedia"
+    }
+  }
+}

@@ -18,6 +18,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
+from media import AudioPipeline, ImagePipeline
+from media.base import MediaArtifact
+from media.utils import MediaPipelineError
+
 # Import tools from local directory first, fallback to API directory
 try:
     # Try local tools.py first (in poets-cron-service directory)
@@ -143,6 +147,19 @@ class PoetsService:
         self.setup_logging()
         self.logger = logging.getLogger(__name__)
         self.lock_file = os.path.join(os.path.dirname(config_path), "poets_generation.lock")
+        self.media_config = self.config.get('media', {})
+        self.media_enabled = bool(self.media_config.get('enabled'))
+        self.media_output_root: Optional[Path] = None
+        self.media_pipelines: Dict[str, Any] = {}
+        self.media_prompt_type_map: Dict[str, str] = {}
+        self.media_available = False
+
+        if self.media_enabled:
+            try:
+                self._initialize_media_support()
+            except Exception as exc:
+                self.logger.error(f"Media pipeline initialization failed: {exc}")
+                self.media_enabled = False
         
     def load_config(self) -> Dict[str, Any]:
         """Load configuration from JSON file"""
@@ -172,10 +189,210 @@ class PoetsService:
             ]
         )
 
+    def _initialize_media_support(self):
+        """Instantiate media pipelines and ensure database schema."""
+        config_dir = Path(self.config_path).parent.resolve()
+        comfy_config = self.media_config.get('comfyui', {})
+        scripts = self.media_config.get('scripts', {})
+        script_args_config = self.media_config.get('script_args', {})
+
+        output_directory = comfy_config.get('output_directory', 'GeneratedMedia')
+        self.media_output_root = (config_dir / output_directory).resolve()
+        self.media_output_root.mkdir(parents=True, exist_ok=True)
+
+        python_executable = comfy_config.get('python') or sys.executable
+        queue_size = int(comfy_config.get('queue_size', 1))
+        timeout_seconds = int(comfy_config.get('timeout_seconds', 600))
+        comfyui_directory = comfy_config.get('comfyui_directory')
+
+        pipelines: Dict[str, Any] = {}
+        script_definitions = {
+            'image': ('image', ImagePipeline),
+            'music': ('audio', AudioPipeline),
+            'audio': ('audio', AudioPipeline),
+        }
+
+        for script_key, (artifact_type, pipeline_cls) in script_definitions.items():
+            script_rel_path = scripts.get(script_key)
+            if not script_rel_path:
+                continue
+
+            script_path = (config_dir / script_rel_path).resolve()
+            if not script_path.exists():
+                self.logger.error(
+                    f"Media script for '{script_key}' prompts not found at {script_path}"
+                )
+                continue
+
+            if artifact_type in pipelines:
+                # Already configured (e.g., both 'music' and 'audio' entries)
+                continue
+
+            raw_extra_args = script_args_config.get(script_key, [])
+            if isinstance(raw_extra_args, str):
+                extra_args = [raw_extra_args]
+            else:
+                extra_args = list(raw_extra_args or [])
+            pipelines[artifact_type] = pipeline_cls(
+                script_path=script_path,
+                python_executable=python_executable,
+                output_root=self.media_output_root,
+                queue_size=queue_size,
+                timeout_seconds=timeout_seconds,
+                comfyui_directory=comfyui_directory,
+                extra_args=extra_args,
+            )
+
+        self.media_pipelines = pipelines
+
+        default_map = {
+            'image': 'image',
+            'music': 'audio',
+            'audio': 'audio',
+            'voice': 'audio',
+        }
+        configured_map = {
+            key.lower(): value
+            for key, value in self.media_config.get('prompt_type_map', {}).items()
+        }
+        default_map.update(configured_map)
+        self.media_prompt_type_map = default_map
+
+        if not self.media_pipelines:
+            self.logger.warning(
+                "Media processing is enabled but no pipelines were initialised. "
+                "Media prompts will be skipped."
+            )
+            self.media_available = False
+            return
+
+        try:
+            self.ensure_media_schema()
+        except Exception:
+            # Schema initialisation already logged; disable media support for this run.
+            self.media_available = False
+            return
+
+        # Perform a lightweight health check; if it fails we log but continue gracefully.
+        if self._check_comfyui_health():
+            self.media_available = True
+        else:
+            self.logger.warning(
+                "ComfyUI health check failed; media prompts will be deferred until the "
+                "service detects the server is reachable."
+            )
+            self.media_available = False
+
     def get_database_connection(self):
         """Get database connection"""
         db_path = self.config['database']['path']
         return sqlite3.connect(db_path)
+
+    def ensure_media_schema(self):
+        """Ensure database tables and columns required for media artifacts exist."""
+        if not self.media_enabled:
+            return
+
+        conn = None
+        try:
+            conn = self.get_database_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM prompt_artifacts WHERE prompt_id = ?",
+                (prompt_id,),
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS prompt_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prompt_id INTEGER NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    preview_path TEXT,
+                    metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(prompt_id) REFERENCES prompts(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            cursor.execute("PRAGMA table_info('prompts')")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+
+            if 'artifact_status' not in existing_columns:
+                cursor.execute(
+                    "ALTER TABLE prompts ADD COLUMN artifact_status TEXT DEFAULT 'pending'"
+                )
+
+            if 'artifact_metadata' not in existing_columns:
+                cursor.execute(
+                    "ALTER TABLE prompts ADD COLUMN artifact_metadata TEXT"
+                )
+
+            conn.commit()
+        except Exception as exc:
+            self.logger.error(f"Failed to ensure media schema: {exc}")
+            raise
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def record_prompt_artifacts(self, prompt_id: int, artifacts: List[MediaArtifact]):
+        """Persist generated artifact metadata to the database."""
+        if not artifacts:
+            return
+
+        conn = None
+        try:
+            conn = self.get_database_connection()
+            cursor = conn.cursor()
+            rows = [
+                (
+                    prompt_id,
+                    artifact.artifact_type,
+                    artifact.file_path,
+                    artifact.preview_path,
+                    json.dumps(artifact.metadata) if artifact.metadata else None,
+                )
+                for artifact in artifacts
+            ]
+            cursor.executemany(
+                """
+                INSERT INTO prompt_artifacts (
+                    prompt_id,
+                    artifact_type,
+                    file_path,
+                    preview_path,
+                    metadata
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+        except Exception as exc:
+            self.logger.error(f"Failed to record prompt artifacts: {exc}")
+            raise
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _check_comfyui_health(self) -> bool:
+        """Perform a lightweight health check against the configured ComfyUI host."""
+        comfy_config = self.media_config.get('comfyui', {})
+        host = comfy_config.get('host')
+        if not host:
+            return True
+
+        host = host.rstrip('/')
+        health_url = f"{host}/system_stats"
+        try:
+            response = requests.get(health_url, timeout=5)
+            return response.status_code == 200
+        except Exception as exc:
+            self.logger.debug(f"ComfyUI health check error: {exc}")
+            return False
 
     def get_unprocessed_prompts(self) -> List[Dict]:
         """Get unprocessed prompts from the database queue"""
@@ -244,32 +461,49 @@ class PoetsService:
             )
         """)
 
-    def update_prompt_status(self, prompt_id: int, status: str, error_message: Optional[str] = None):
+    def update_prompt_status(
+        self,
+        prompt_id: int,
+        status: str,
+        error_message: Optional[str] = None,
+        *,
+        artifact_status: Optional[str] = None,
+        artifact_metadata: Optional[Dict[str, Any]] = None,
+    ):
         """Update the status of a prompt in the database"""
         try:
             conn = self.get_database_connection()
             cursor = conn.cursor()
             
             now = datetime.now().isoformat()
-            
+
+            updates: Dict[str, Any] = {"status": status}
+
             if status == 'processing':
-                cursor.execute("""
-                    UPDATE prompts 
-                    SET status = ?, processed_at = ?
-                    WHERE id = ?
-                """, (status, now, prompt_id))
-            elif status == 'completed':
-                cursor.execute("""
-                    UPDATE prompts 
-                    SET status = ?, completed_at = ?
-                    WHERE id = ?
-                """, (status, now, prompt_id))
-            elif status == 'failed':
-                cursor.execute("""
-                    UPDATE prompts 
-                    SET status = ?, completed_at = ?, error_message = ?
-                    WHERE id = ?
-                """, (status, now, error_message, prompt_id))
+                updates['processed_at'] = now
+            elif status in ('completed', 'failed'):
+                updates['completed_at'] = now
+
+            if error_message is not None:
+                updates['error_message'] = error_message
+            elif status != 'failed':
+                # Clear previous error messages when transitioning out of failure
+                updates['error_message'] = None
+
+            if artifact_status is not None:
+                updates['artifact_status'] = artifact_status
+
+            if artifact_metadata is not None:
+                updates['artifact_metadata'] = json.dumps(artifact_metadata)
+
+            assignments = ", ".join(f"{column} = ?" for column in updates)
+            values = list(updates.values())
+            values.append(prompt_id)
+
+            cursor.execute(
+                f"UPDATE prompts SET {assignments} WHERE id = ?",
+                values,
+            )
             
             conn.commit()
             conn.close()
@@ -641,6 +875,110 @@ class PoetsService:
             self.update_prompt_status(prompt_id, 'failed', str(e))
             return False
     
+    def process_media_prompt(self, prompt: Dict[str, Any]) -> bool:
+        """Process a media prompt via the configured pipeline."""
+        prompt_id = prompt['id']
+        prompt_type = (prompt.get('prompt_type') or '').lower()
+        pipeline_key = self.media_prompt_type_map.get(prompt_type)
+
+        if not pipeline_key:
+            self.logger.warning(
+                f"No media pipeline configured for prompt type '{prompt_type}'"
+            )
+            self.update_prompt_status(
+                prompt_id,
+                'failed',
+                error_message=f"No media pipeline for prompt type '{prompt_type}'",
+                artifact_status='unsupported',
+            )
+            return False
+
+        pipeline = self.media_pipelines.get(pipeline_key)
+        if not pipeline:
+            self.logger.warning(
+                f"Media pipeline '{pipeline_key}' is not available for prompt #{prompt_id}"
+            )
+            self.update_prompt_status(
+                prompt_id,
+                'failed',
+                error_message=f"Media pipeline '{pipeline_key}' is unavailable",
+                artifact_status='unsupported',
+            )
+            return False
+
+        if not self.media_available:
+            if self._check_comfyui_health():
+                self.media_available = True
+            else:
+                self.logger.warning(
+                    f"ComfyUI is unavailable; skipping media prompt #{prompt_id}"
+                )
+                self.update_prompt_status(
+                    prompt_id,
+                    'failed',
+                    error_message="ComfyUI host is unavailable",
+                    artifact_status='error',
+                )
+                return False
+
+        self.update_prompt_status(
+            prompt_id,
+            'processing',
+            artifact_status='processing',
+        )
+
+        try:
+            result = pipeline.run(
+                prompt_id=prompt_id,
+                prompt_text=prompt.get('prompt_text', ''),
+                metadata=prompt.get('metadata'),
+            )
+            artifacts: List[MediaArtifact] = result.get('artifacts', [])
+            self.record_prompt_artifacts(prompt_id, artifacts)
+
+            summary_metadata = {
+                "duration_seconds": result.get('duration_seconds'),
+                "run_directory": result.get('run_directory'),
+                "stdout_tail": (result.get('stdout') or "")[-2000:],
+                "stderr_tail": (result.get('stderr') or "")[-2000:],
+                "artifact_count": len(artifacts),
+            }
+
+            self.update_prompt_status(
+                prompt_id,
+                'completed',
+                artifact_status='ready',
+                artifact_metadata=summary_metadata,
+            )
+            self.logger.info(
+                f"Media generation succeeded for prompt #{prompt_id} "
+                f"({len(artifacts)} artifact(s))"
+            )
+            return True
+
+        except MediaPipelineError as exc:
+            self.logger.error(
+                f"Media pipeline error for prompt #{prompt_id}: {exc}"
+            )
+            self.update_prompt_status(
+                prompt_id,
+                'failed',
+                error_message=str(exc),
+                artifact_status='error',
+            )
+        except Exception as exc:
+            self.logger.error(
+                f"Unexpected media processing failure for prompt #{prompt_id}: {exc}"
+            )
+            self.update_prompt_status(
+                prompt_id,
+                'failed',
+                error_message=str(exc),
+                artifact_status='error',
+            )
+
+        return False
+    
     def test_configuration(self) -> bool:
         """Test the service configuration"""
         self.logger.info("Testing service configuration...")
@@ -673,6 +1011,21 @@ class PoetsService:
             self.logger.error(f"Database not found at: {db_path}")
             return False
         
+        if self.media_enabled:
+            if not self.media_pipelines:
+                self.logger.warning(
+                    "Media support is enabled but no pipelines are available. "
+                    "Media prompts will be skipped."
+                )
+            elif self._check_comfyui_health():
+                self.media_available = True
+            else:
+                self.media_available = False
+                self.logger.warning(
+                    "ComfyUI host is unreachable during configuration test; "
+                    "media prompts will be skipped until connectivity is restored."
+                )
+
         self.logger.info("Configuration test passed!")
         return True
     
@@ -719,7 +1072,12 @@ class PoetsService:
                 # Process each prompt
                 for prompt in prompts:
                     self.logger.info(f"Processing prompt #{prompt['id']}: {prompt['prompt_text'][:50]}...")
-                    success = self.run_generation_session(base_url, prompt)
+                    prompt_type = (prompt.get('prompt_type') or 'text').lower()
+
+                    if self.media_enabled and prompt_type in self.media_prompt_type_map:
+                        success = self.process_media_prompt(prompt)
+                    else:
+                        success = self.run_generation_session(base_url, prompt)
                     
                     if success:
                         self.logger.info(f"Successfully processed prompt #{prompt['id']}")
