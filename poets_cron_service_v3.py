@@ -299,10 +299,6 @@ class PoetsService:
         try:
             conn = self.get_database_connection()
             cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM prompt_artifacts WHERE prompt_id = ?",
-                (prompt_id,),
-            )
 
             cursor.execute(
                 """
