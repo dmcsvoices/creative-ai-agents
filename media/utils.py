@@ -5,7 +5,9 @@ Utility helpers for executing SaveAsScript workflows and collecting artifacts.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -83,10 +85,16 @@ def run_workflow(
     Raises:
         MediaPipelineError: if the process exits with a non-zero return code.
     """
+    logger = logging.getLogger("media.workflow")
+
     if not script_path.exists():
         raise MediaPipelineError(f"Workflow script not found: {script_path}")
 
     command: List[str] = [python_executable, str(script_path), *workflow_args]
+    logger.debug(
+        "Executing workflow: %s",
+        " ".join(shlex.quote(part) for part in command),
+    )
 
     env = os.environ.copy()
     if env_overrides:
@@ -104,6 +112,9 @@ def run_workflow(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
+        logger.error(
+            "Workflow %s timed out after %ss", script_path.name, timeout_seconds
+        )
         raise MediaPipelineError(
             f"Workflow timed out after {timeout_seconds}s: {script_path}"
         ) from exc
@@ -117,8 +128,18 @@ def run_workflow(
     )
 
     if completed.returncode != 0:
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        logger.error(
+            "Workflow %s failed with code %s\nstdout:\n%s\nstderr:\n%s",
+            script_path.name,
+            completed.returncode,
+            stdout or "<empty>",
+            stderr or "<empty>",
+        )
         raise MediaPipelineError(
-            f"Workflow {script_path.name} failed with code {completed.returncode}",
+            f"Workflow {script_path.name} failed with code {completed.returncode}. "
+            f"See media.workflow logs for stdout/stderr details.",
         )
 
     return result
@@ -127,4 +148,3 @@ def run_workflow(
 def relative_to_root(path: Path, root: Path) -> str:
     """Return a POSIX string path relative to the root directory."""
     return path.relative_to(root).as_posix()
-

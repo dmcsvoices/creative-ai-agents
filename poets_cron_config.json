@@ -32,7 +32,7 @@
   },
   
   "database": {
-    "path": "/Volumes/Tikbalang2TB/Users/tikbalang/Desktop/anthonys_musings.db",
+    "path": "/Users/tikbalang/Desktop/anthonys_musings.db",
     "backup_before_processing": false
   },
   
@@ -118,7 +118,7 @@
       "music": "media/audio_workflow.py"
     },
     "comfyui": {
-      "python": "/usr/bin/python3",
+      "python": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/bin/python",
       "comfyui_directory": null,
       "queue_size": 1,
       "timeout_seconds": 900,
