@@ -92,7 +92,7 @@ def save_to_sqlite_database(
     
     # Default database path
     if not db_path:
-        db_path = "/Users/tikbalang/Desktop/anthonys_musings.db"
+        db_path = "/Volumes/Tikbalang2TB/Users/tikbalang/Desktop/anthonys_musings.db"
     
     # Check if database exists
     if not os.path.exists(db_path):
@@ -409,7 +409,7 @@ def query_database_content(
         Formatted string with query results
     """
     if not db_path:
-        db_path = "/Users/tikbalang/Desktop/anthonys_musings.db"
+        db_path = "/Volumes/Tikbalang2TB/Users/tikbalang/Desktop/anthonys_musings.db"
     
     if not os.path.exists(db_path):
         return f"Database not found at {db_path}"
@@ -495,7 +495,7 @@ def query_database_content(
 def get_database_stats(db_path: Optional[str] = None) -> str:
     """Get database statistics for AI agents. Fixed for concurrent access."""
     if not db_path:
-        db_path = "/Users/tikbalang/Desktop/anthonys_musings.db"
+        db_path = "/Volumes/Tikbalang2TB/Users/tikbalang/Desktop/anthonys_musings.db"
     
     if not os.path.exists(db_path):
         return f"Database not found at {db_path}"

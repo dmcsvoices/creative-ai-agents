@@ -32,7 +32,7 @@
   },
   
   "database": {
-    "path": "/Users/tikbalang/Desktop/anthonys_musings.db",
+    "path": "/Volumes/Tikbalang2TB/Users/tikbalang/Desktop/anthonys_musings.db",
     "backup_before_processing": false
   },
   
@@ -114,16 +114,16 @@
       "music": "audio"
     },
     "scripts": {
-      "image": "media/image_workflow.py",
-      "music": "media/audio_workflow.py"
+      "image": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/ComfyUI/poets_service/image_workflow.py",
+      "music": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/ComfyUI/poets_service/audio_workflow.py"
     },
     "comfyui": {
       "python": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/bin/python",
-      "comfyui_directory": null,
+      "comfyui_directory": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/ComfyUI",
       "queue_size": 1,
       "timeout_seconds": 900,
       "host": "http://127.0.0.1:8188",
-      "output_directory": "output"
+      "output_directory": "output/poets"
     }
   }
 }
