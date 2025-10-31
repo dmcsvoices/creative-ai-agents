@@ -199,6 +199,8 @@ class PoetsService:
         output_directory = comfy_config.get('output_directory', 'GeneratedMedia')
         self.media_output_root = (config_dir / output_directory).resolve()
         self.media_output_root.mkdir(parents=True, exist_ok=True)
+        for subdir in ('image', 'audio'):
+            (self.media_output_root / subdir).mkdir(parents=True, exist_ok=True)
 
         python_executable = comfy_config.get('python') or sys.executable
         queue_size = int(comfy_config.get('queue_size', 1))
