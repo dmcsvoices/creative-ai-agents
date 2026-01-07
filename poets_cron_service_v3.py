@@ -803,16 +803,169 @@ class PoetsService:
             
         else:
             self.logger.warning(f"⚠️ Unknown agent type for {agent_name}: {type(agent).__name__}")
-    
+
+    def _create_structured_prompt_agents(self, config_lists: Dict, prompt_data: Dict) -> List:
+        """
+        Create specialized agents for generating structured JSON prompts.
+        These agents are instructed to output valid JSON for image/lyrics prompts.
+        """
+        agents = []
+        prompt_type = prompt_data.get('prompt_type', 'text')
+
+        # Determine JSON schema based on prompt type
+        if prompt_type == 'image_prompt':
+            json_instruction = """
+            You must output ONLY valid JSON following this exact schema:
+            {
+                "prompt": "detailed image description with style, composition, lighting",
+                "negative_prompt": "things to avoid in the image",
+                "style_tags": ["tag1", "tag2", "tag3"],
+                "technical_params": {
+                    "aspect_ratio": "16:9",
+                    "quality": "high",
+                    "mood": "describe the mood"
+                },
+                "composition": {
+                    "subject": "main subject description",
+                    "background": "background setting",
+                    "lighting": "lighting description"
+                }
+            }
+
+            Create a vivid, detailed image prompt based on the user's request.
+            Output ONLY the JSON object, no other text.
+            """
+        elif prompt_type == 'lyrics_prompt':
+            json_instruction = """
+            You must output ONLY valid JSON following this exact schema:
+            {
+                "title": "Song Title",
+                "genre": "genre name",
+                "mood": "emotional mood",
+                "tempo": "slow/medium/fast",
+                "structure": [
+                    {"type": "verse", "number": 1, "lyrics": "verse lyrics here..."},
+                    {"type": "chorus", "lyrics": "chorus lyrics here..."}
+                ],
+                "metadata": {
+                    "key": "musical key",
+                    "time_signature": "4/4",
+                    "vocal_style": "vocal description",
+                    "instrumentation": ["instrument1", "instrument2"]
+                }
+            }
+
+            Create complete song lyrics with structure based on the user's request.
+            Output ONLY the JSON object, no other text.
+            """
+        else:
+            json_instruction = "Output valid JSON based on the user's request."
+
+        # Create modified agent configurations with JSON instruction
+        for agent_config in self.config.get('agents', []):
+            agent_name = agent_config['name']
+            agent_type = agent_config['type']
+
+            # Skip ContentManager for structured prompts - we only need the creative agents
+            if agent_type == 'UserProxyAgent':
+                continue
+
+            # Add JSON instruction to system message
+            original_system_message = agent_config.get('system_message', '')
+            enhanced_system_message = f"{original_system_message}\n\n{json_instruction}"
+
+            # Get config assignment
+            config_assignment = agent_config.get('config_assignment', 'none')
+            llm_config = None
+
+            if config_assignment != 'none' and config_assignment in config_lists:
+                llm_config = {"config_list": config_lists[config_assignment]}
+
+            # Create agent
+            if agent_type == 'AssistantAgent':
+                agent = autogen.AssistantAgent(
+                    name=agent_name,
+                    system_message=enhanced_system_message,
+                    llm_config=llm_config
+                )
+                agents.append(agent)
+                self.logger.info(f"Created structured prompt agent: {agent_name}")
+
+        return agents
+
+    def _run_structured_prompt_generation(self, base_url: str, prompt_data: Dict) -> bool:
+        """
+        Generate structured JSON prompts for image/lyrics that will be processed
+        by the offline ComfyUI app. Saves JSON as text to the database.
+        """
+        try:
+            prompt_id = prompt_data['id']
+            prompt_text = prompt_data['prompt_text']
+            prompt_type = prompt_data.get('prompt_type', 'text')
+
+            self.logger.info(f"Starting structured prompt generation for #{prompt_id} ({prompt_type})")
+
+            # Update status to processing
+            self.update_prompt_status(prompt_id, 'processing')
+
+            # Create configuration lists
+            config_lists = self.create_config_lists(base_url)
+
+            # Create specialized agents for structured output
+            agents = self._create_structured_prompt_agents(config_lists, prompt_data)
+
+            if len(agents) < 1:
+                self.logger.error("Need at least 1 agent for structured prompt generation")
+                self.update_prompt_status(prompt_id, 'failed', 'No agents available')
+                return False
+
+            # Build the prompt
+            enhanced_prompt = f"Create a structured {prompt_type} based on: {prompt_text}"
+
+            # For structured prompts, use a simpler setup - direct agent chat
+            # Since we only need JSON output, we don't need complex group chat
+            primary_agent = agents[0]
+
+            # Create a simple user proxy to receive the response
+            user_proxy = autogen.UserProxyAgent(
+                name="StructuredPromptCollector",
+                human_input_mode="NEVER",
+                max_consecutive_auto_reply=0,
+                code_execution_config=False
+            )
+
+            # Initiate chat
+            user_proxy.initiate_chat(
+                primary_agent,
+                message=enhanced_prompt,
+                max_turns=1
+            )
+
+            # The response will be automatically saved via the save_to_database tool
+            # Mark as completed with artifact_status='pending' so offline app knows to process it
+            self.update_prompt_status(prompt_id, 'completed', artifact_status='pending')
+            self.logger.info(f"Structured prompt generation completed for #{prompt_id}, marked as pending for media generation")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error in structured prompt generation: {str(e)}")
+            self.update_prompt_status(prompt_id, 'failed', str(e))
+            return False
+
     def run_generation_session(self, base_url: str, prompt_data: Dict) -> bool:
         """Run a content generation session for a specific prompt"""
         try:
             prompt_id = prompt_data['id']
             prompt_text = prompt_data['prompt_text']
             prompt_type = prompt_data.get('prompt_type', 'text')
-            
+
+            # Route structured prompt types to specialized handler
+            if prompt_type in ['image_prompt', 'lyrics_prompt']:
+                self.logger.info(f"Routing {prompt_type} #{prompt_id} to structured prompt generation")
+                return self._run_structured_prompt_generation(base_url, prompt_data)
+
             self.logger.info(f"Starting generation for prompt #{prompt_id}: {prompt_text[:100]}...")
-            
+
             # Update status to processing
             self.update_prompt_status(prompt_id, 'processing')
             

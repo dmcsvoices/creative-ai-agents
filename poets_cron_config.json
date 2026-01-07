@@ -76,7 +76,7 @@
   "processing": {
     "max_rounds": 20,
     "batch_size": 1,
-    "supported_types": ["text", "poetry", "prose", "dialogue","song"],
+    "supported_types": ["text", "poetry", "prose", "dialogue", "song", "image_prompt", "lyrics_prompt"],
     "retry_failed_attempts": 3,
     "processing_delay_seconds": 5,
     "max_processing_time_minutes": 15,

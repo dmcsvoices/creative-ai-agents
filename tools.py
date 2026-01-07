@@ -249,40 +249,56 @@ def _analyze_content(content: str) -> Dict[str, Any]:
     analysis['explicit'] = explicit_count > 2
     
     # 3. CONTENT TYPE DETECTION - More flexible, any type allowed
-    if analysis['explicit']:
-        analysis['content_type'] = 'erotica'
-        analysis['quality_score'] = 3  # Lower default for explicit
-    elif ('anthony:' in lower and 'cindy:' in lower) or content.count('"') > 4:
-        analysis['content_type'] = 'dialogue'
-        analysis['quality_score'] = 7
-    elif any(word in lower for word in ['trump', 'netanyahu', 'g20', 'summit', 'president']):
-        analysis['content_type'] = 'political'
-        analysis['quality_score'] = 8
-    elif any(word in lower for word in ['hasbara', 'palestine', 'gaza', 'theme park', 'petting zoo']):
-        analysis['content_type'] = 'satire'
-        analysis['quality_score'] = 8
-    elif 'chapter' in lower and len(content.split()) > 100:
-        analysis['content_type'] = 'prose'
-        analysis['quality_score'] = 7
-    elif content.startswith('O ') and ',' in content[:50]:
-        analysis['content_type'] = 'poetry'
-        analysis['quality_score'] = 8
-    elif '[verse]' in lower or '[chorus]' in lower or 'verse 1' in lower:
-        analysis['content_type'] = 'song'
-        analysis['quality_score'] = 7
-    elif 'def ' in content or 'function ' in content or 'import ' in content:
-        analysis['content_type'] = 'code'
-        analysis['quality_score'] = 6
-    else:
-        # Check for poetry by structure
-        if lines and len(lines) > 3:
-            short_lines = sum(1 for l in lines if len(l) < 60)
-            if short_lines / len(lines) > 0.6:
-                analysis['content_type'] = 'poetry'
-                analysis['quality_score'] = 6
-            else:
-                analysis['content_type'] = 'fragment'
-                analysis['quality_score'] = 5
+    # Check for JSON-structured prompts first
+    if '{' in content and '}' in content:
+        # Image prompt detection
+        if ('"prompt"' in content and '"style' in lower) or ('"composition"' in lower and '"lighting"' in lower):
+            analysis['content_type'] = 'image_prompt'
+            analysis['quality_score'] = 8
+        # Lyrics prompt detection
+        elif ('"structure"' in lower and 'verse' in lower) or ('"lyrics"' in lower and '"chorus"' in lower):
+            analysis['content_type'] = 'lyrics_prompt'
+            analysis['quality_score'] = 8
+        # General JSON content
+        elif '"' in content and ':' in content:
+            # Don't override, continue to other checks
+            pass
+
+    if analysis['content_type'] == 'fragment':  # Only proceed if not already detected
+        if analysis['explicit']:
+            analysis['content_type'] = 'erotica'
+            analysis['quality_score'] = 3  # Lower default for explicit
+        elif ('anthony:' in lower and 'cindy:' in lower) or content.count('"') > 4:
+            analysis['content_type'] = 'dialogue'
+            analysis['quality_score'] = 7
+        elif any(word in lower for word in ['trump', 'netanyahu', 'g20', 'summit', 'president']):
+            analysis['content_type'] = 'political'
+            analysis['quality_score'] = 8
+        elif any(word in lower for word in ['hasbara', 'palestine', 'gaza', 'theme park', 'petting zoo']):
+            analysis['content_type'] = 'satire'
+            analysis['quality_score'] = 8
+        elif 'chapter' in lower and len(content.split()) > 100:
+            analysis['content_type'] = 'prose'
+            analysis['quality_score'] = 7
+        elif content.startswith('O ') and ',' in content[:50]:
+            analysis['content_type'] = 'poetry'
+            analysis['quality_score'] = 8
+        elif '[verse]' in lower or '[chorus]' in lower or 'verse 1' in lower:
+            analysis['content_type'] = 'song'
+            analysis['quality_score'] = 7
+        elif 'def ' in content or 'function ' in content or 'import ' in content:
+            analysis['content_type'] = 'code'
+            analysis['quality_score'] = 6
+        else:
+            # Check for poetry by structure
+            if lines and len(lines) > 3:
+                short_lines = sum(1 for l in lines if len(l) < 60)
+                if short_lines / len(lines) > 0.6:
+                    analysis['content_type'] = 'poetry'
+                    analysis['quality_score'] = 6
+                else:
+                    analysis['content_type'] = 'fragment'
+                    analysis['quality_score'] = 5
     
     # 4. MOOD DETECTION
     mood_indicators = {
