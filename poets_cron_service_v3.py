@@ -941,7 +941,59 @@ class PoetsService:
                 max_turns=1
             )
 
-            # The response will be automatically saved via the save_to_database tool
+            # Extract the JSON response from chat history
+            # AutoGen stores messages as: user_proxy.chat_messages[agent] = list of messages
+            # We want the last message from the agent (the assistant's response)
+            chat_history = user_proxy.chat_messages.get(primary_agent, [])
+            json_response = None
+
+            # Look for the agent's response (last non-user message with content)
+            for message in reversed(chat_history):
+                # In AutoGen, agent responses have 'name' field matching the agent name
+                if message.get('name') == primary_agent.name and message.get('content'):
+                    json_response = message['content'].strip()
+                    self.logger.info(f"Extracted JSON response ({len(json_response)} chars)")
+                    break
+
+            if not json_response or not json_response.startswith('{'):
+                self.logger.error(f"No valid JSON response received from agent for prompt #{prompt_id}")
+                self.update_prompt_status(prompt_id, 'failed', 'No valid JSON response from agent')
+                return False
+
+            # Save the JSON to the database
+            from tools import save_to_sqlite_database
+
+            db_path = self.config.get('database', {}).get('path')
+            status_msg, writing_id = save_to_sqlite_database(
+                content=json_response,
+                db_path=db_path,
+                title=f"{prompt_type.replace('_', ' ').title()}: {prompt_text[:50]}...",
+                content_type=prompt_type,
+                publication_status='draft',
+                notes=f"Structured JSON prompt for offline media generation (Prompt #{prompt_id})"
+            )
+
+            self.logger.info(status_msg)
+
+            # Link the writing to the prompt
+            if writing_id > 0:
+                conn = sqlite3.connect(db_path, timeout=30.0)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE prompts SET output_reference = ? WHERE id = ?",
+                        (writing_id, prompt_id)
+                    )
+                    cursor.execute(
+                        "UPDATE writings SET source_prompt_id = ? WHERE id = ?",
+                        (prompt_id, writing_id)
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                self.logger.info(f"Linked writing #{writing_id} to prompt #{prompt_id}")
+
             # Mark as completed with artifact_status='pending' so offline app knows to process it
             self.update_prompt_status(prompt_id, 'completed', artifact_status='pending')
             self.logger.info(f"Structured prompt generation completed for #{prompt_id}, marked as pending for media generation")
