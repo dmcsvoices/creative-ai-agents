@@ -1403,7 +1403,16 @@ class PoetsService:
                     time.sleep(2)
 
                 self.logger.info("Queue processing completed")
-                
+
+                # Force WAL checkpoint so Docker API container sees updates immediately
+                try:
+                    conn = self.get_database_connection()
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.close()
+                    self.logger.info("WAL checkpoint completed")
+                except Exception as e:
+                    self.logger.warning(f"WAL checkpoint failed: {e}")
+
         except RuntimeError as e:
             self.logger.info(f"Skipping execution: {e}")
         except Exception as e:
