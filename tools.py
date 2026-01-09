@@ -34,14 +34,15 @@ def get_database_connection(db_path: str, timeout: int = 30):
     """Get database connection with proper configuration for concurrent access"""
     try:
         conn = sqlite3.connect(db_path, timeout=timeout)
-        
+
         # Configure for concurrent access
-        conn.execute("PRAGMA journal_mode=WAL")
+        # COMMENTED OUT to prevent WAL mode conflicts with Poets Service main connection
+        # conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=10000")
         conn.execute("PRAGMA temp_store=memory")
         conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
-        
+
         return conn
     except Exception as e:
         print(f"Database connection error: {e}")
