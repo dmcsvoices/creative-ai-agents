@@ -36,8 +36,9 @@ def get_database_connection(db_path: str, timeout: int = 30):
         conn = sqlite3.connect(db_path, timeout=timeout)
 
         # Configure for concurrent access
-        # COMMENTED OUT to prevent WAL mode conflicts with Poets Service main connection
-        # conn.execute("PRAGMA journal_mode=WAL")
+        # Enable WAL mode to match main service connection
+        # Safe now because main service initializes WAL mode first, and PRAGMA is idempotent
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=10000")
         conn.execute("PRAGMA temp_store=memory")

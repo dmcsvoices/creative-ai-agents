@@ -1058,7 +1058,7 @@ class PoetsService:
 
             # Link the writing to the prompt
             if writing_id > 0:
-                conn = sqlite3.connect(db_path, timeout=30.0)
+                conn = self.get_database_connection()
                 try:
                     cursor = conn.cursor()
                     cursor.execute(
