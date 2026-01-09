@@ -286,16 +286,9 @@ class PoetsService:
             self.media_available = False
 
     def get_database_connection(self):
-        """Get database connection with consistent WAL mode settings"""
+        """Get database connection"""
         db_path = self.config['database']['path']
-        conn = sqlite3.connect(db_path)
-
-        # Enable WAL mode for all connections (matches what save_to_sqlite_database does)
-        # This ensures all connections use the same journal mode
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-
-        return conn
+        return sqlite3.connect(db_path)
 
     def ensure_media_schema(self):
         """Ensure database tables and columns required for media artifacts exist."""
