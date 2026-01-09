@@ -439,6 +439,43 @@ class PoetsService:
             self.logger.error(f"Error getting unprocessed prompts: {e}")
             return []
 
+    def get_pending_media_prompts(self) -> List[Dict]:
+        """Get prompts that need media generation (status='completed', artifact_status='pending')"""
+        try:
+            conn = self.get_database_connection()
+            cursor = conn.cursor()
+
+            # Get prompts that need media generation
+            cursor.execute("""
+                SELECT p.id, p.prompt_text, p.prompt_type, p.priority, p.metadata, p.created_at, p.output_reference
+                FROM prompts p
+                WHERE p.status = 'completed'
+                AND p.artifact_status = 'pending'
+                AND p.prompt_type IN ('image_prompt', 'lyrics_prompt')
+                ORDER BY p.priority ASC, p.created_at ASC
+                LIMIT 5
+            """)
+
+            prompts = []
+            for row in cursor.fetchall():
+                metadata = json.loads(row[4]) if row[4] else {}
+                prompts.append({
+                    'id': row[0],
+                    'prompt_text': row[1],
+                    'prompt_type': row[2],
+                    'priority': row[3],
+                    'metadata': metadata,
+                    'created_at': row[5],
+                    'output_reference': row[6]
+                })
+
+            conn.close()
+            return prompts
+
+        except Exception as e:
+            self.logger.error(f"Error getting pending media prompts: {e}")
+            return []
+
     def create_prompts_table(self, cursor):
         """Create the prompts table if it doesn't exist"""
         cursor.execute("""
@@ -472,7 +509,7 @@ class PoetsService:
         try:
             conn = self.get_database_connection()
             cursor = conn.cursor()
-            
+
             now = datetime.now().isoformat()
 
             updates: Dict[str, Any] = {"status": status}
@@ -502,12 +539,13 @@ class PoetsService:
                 f"UPDATE prompts SET {assignments} WHERE id = ?",
                 values,
             )
-            
+
             conn.commit()
             conn.close()
-            
+
         except Exception as e:
             self.logger.error(f"Error updating prompt status: {e}")
+            raise  # Re-raise so caller knows update failed
         
     def check_environment(self) -> bool:
         """Check required environment variables"""
@@ -960,6 +998,42 @@ class PoetsService:
                 self.update_prompt_status(prompt_id, 'failed', 'No valid JSON response from agent')
                 return False
 
+            # Validate that the JSON is actually parseable
+            try:
+                parsed_json = json.loads(json_response)
+                self.logger.info(f"JSON validation passed for prompt #{prompt_id}")
+
+                # Verify required fields based on prompt type
+                if prompt_type == 'lyrics_prompt':
+                    required_fields = ['title', 'genre', 'mood', 'tempo', 'structure']
+                    missing_fields = [field for field in required_fields if field not in parsed_json]
+                    if missing_fields:
+                        self.logger.error(f"Missing required fields in lyrics JSON: {missing_fields}")
+                        self.update_prompt_status(
+                            prompt_id, 'failed',
+                            f'Invalid lyrics JSON: missing fields {missing_fields}'
+                        )
+                        return False
+                elif prompt_type == 'image_prompt':
+                    required_fields = ['prompt']
+                    missing_fields = [field for field in required_fields if field not in parsed_json]
+                    if missing_fields:
+                        self.logger.error(f"Missing required fields in image JSON: {missing_fields}")
+                        self.update_prompt_status(
+                            prompt_id, 'failed',
+                            f'Invalid image JSON: missing fields {missing_fields}'
+                        )
+                        return False
+
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Invalid JSON from agent for prompt #{prompt_id}: {e}")
+                self.logger.error(f"Malformed JSON content (first 500 chars): {json_response[:500]}")
+                self.update_prompt_status(
+                    prompt_id, 'failed',
+                    f'Agent returned invalid JSON: {str(e)}'
+                )
+                return False
+
             # Save the JSON to the database
             from tools import save_to_sqlite_database
 
@@ -1243,53 +1317,84 @@ class PoetsService:
                 
                 # 🔥 FIX: Check for prompts FIRST - before any expensive operations
                 prompts = self.get_unprocessed_prompts()
-                
-                if not prompts:
+
+                # Only check for media prompts if media generation is enabled
+                media_prompts = []
+                if self.media_available:
+                    media_prompts = self.get_pending_media_prompts()
+
+                if not prompts and not media_prompts:
                     self.logger.info("No unprocessed prompts found - exiting without model validation")
                     return  # ✅ Early exit - no GPU usage!
-                
-                self.logger.info(f"Found {len(prompts)} unprocessed prompts - proceeding with validation")
-                
-                # Only check environment and models if we have work to do
-                if not self.check_environment():
-                    self.logger.error("Environment check failed")
-                    return
-                
-                # Determine backend URL
-                backend_config = self.config.get('backend', {})
-                primary_backend = backend_config.get('type', 'oll')
-                base_url = self.get_base_url(primary_backend)
-                
-                if not base_url:
-                    self.logger.error(f"No base URL available for backend type: {primary_backend}")
-                    return
-                
-                # 🔥 FIX: Only validate models if we have prompts to process
-                if self.config['processing'].get('validate_models_on_startup', True):
-                    self.logger.info("Validating models for active prompt processing...")
-                    valid, errors = self.validate_models(base_url)
-                    if not valid:
-                        self.logger.error(f"Model validation failed: {errors}")
+
+                if media_prompts:
+                    self.logger.info(f"Found {len(media_prompts)} pending media prompts to process")
+
+                if prompts:
+                    self.logger.info(f"Found {len(prompts)} unprocessed prompts - proceeding with validation")
+
+                # Only check environment and models if we have TEXT prompts to process
+                if prompts:
+                    if not self.check_environment():
+                        self.logger.error("Environment check failed")
                         return
+
+                    # Determine backend URL
+                    backend_config = self.config.get('backend', {})
+                    primary_backend = backend_config.get('type', 'oll')
+                    base_url = self.get_base_url(primary_backend)
+
+                    if not base_url:
+                        self.logger.error(f"No base URL available for backend type: {primary_backend}")
+                        return
+
+                    # 🔥 FIX: Only validate models if we have prompts to process
+                    if self.config['processing'].get('validate_models_on_startup', True):
+                        self.logger.info("Validating models for active prompt processing...")
+                        valid, errors = self.validate_models(base_url)
+                        if not valid:
+                            self.logger.error(f"Model validation failed: {errors}")
+                            return
+                else:
+                    base_url = None  # No text prompts, skip LLM validation
                 
                 # Process each prompt
                 for prompt in prompts:
                     self.logger.info(f"Processing prompt #{prompt['id']}: {prompt['prompt_text'][:50]}...")
                     prompt_type = (prompt.get('prompt_type') or 'text').lower()
 
-                    if self.media_enabled and prompt_type in self.media_prompt_type_map:
+                    # Structured prompts (image_prompt, lyrics_prompt) always need JSON generation first
+                    # They should NEVER skip directly to media generation
+                    if prompt_type in ['image_prompt', 'lyrics_prompt']:
+                        # Always generate structured JSON first
+                        success = self.run_generation_session(base_url, prompt)
+                    elif self.media_enabled and prompt_type in self.media_prompt_type_map:
+                        # Direct media generation for non-structured media types
                         success = self.process_media_prompt(prompt)
                     else:
+                        # Default text generation
                         success = self.run_generation_session(base_url, prompt)
-                    
+
                     if success:
                         self.logger.info(f"Successfully processed prompt #{prompt['id']}")
                     else:
                         self.logger.error(f"Failed to process prompt #{prompt['id']}")
-                    
+
                     # Small delay between prompts to avoid overwhelming the system
                     time.sleep(2)
-                
+
+                # Process pending media prompts (already have JSON, need media files)
+                for media_prompt in media_prompts:
+                    self.logger.info(f"Processing media for prompt #{media_prompt['id']}: {media_prompt['prompt_type']}")
+                    success = self.process_media_prompt(media_prompt)
+
+                    if success:
+                        self.logger.info(f"Successfully generated media for prompt #{media_prompt['id']}")
+                    else:
+                        self.logger.error(f"Failed to generate media for prompt #{media_prompt['id']}")
+
+                    time.sleep(2)
+
                 self.logger.info("Queue processing completed")
                 
         except RuntimeError as e:

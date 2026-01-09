@@ -108,14 +108,16 @@
   },
 
   "media": {
-    "enabled": true,
+    "enabled": false,
     "prompt_type_map": {
       "image": "image",
-      "music": "audio"
+      "image_prompt": "image",
+      "music": "audio",
+      "lyrics_prompt": "audio"
     },
     "scripts": {
-      "image": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/ComfyUI/poets_service/image_workflow.py",
-      "music": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/ComfyUI/poets_service/audio_workflow.py"
+      "image": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/ComfyUI/MultimediaWorkflow/Z-Image-Turbo-Tshirt_APP.py",
+      "music": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/ComfyUI/MultimediaWorkflow/ace_audio_workflow.py"
     },
     "comfyui": {
       "python": "/Volumes/Tikbalang2TB/Users/tikbalang/comfy_env/bin/python",
