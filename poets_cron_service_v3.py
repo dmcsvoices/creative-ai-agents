@@ -652,38 +652,61 @@ class PoetsService:
         if prompt_type == 'image_prompt':
             json_schema_instructions['schema'] = """
 
-IMPORTANT: For image prompts, use the generate_image_json() tool to create properly formatted JSON.
-This tool takes parameters for prompt, negative_prompt, style_tags, and composition details.
-Discuss and refine the image concept collaboratively, then call generate_image_json() with your final vision.
+🎨 CRITICAL INSTRUCTION FOR IMAGE PROMPTS 🎨
 
-Example workflow:
-1. Discuss and brainstorm the image concept
-2. Refine the visual details, mood, composition
-3. Call generate_image_json() with all the details
+You MUST use the generate_image_json() tool to complete this task.
+DO NOT output raw JSON text. DO NOT try to format JSON yourself.
+The generate_image_json() tool handles all formatting automatically.
 
-The tool will automatically save the structured JSON to the database."""
+Workflow:
+1. Collaborate and discuss the image concept, visual style, mood, composition
+2. Research if needed using web_research_tool()
+3. When ready, ONE agent should call generate_image_json() with these parameters:
+   - prompt: Detailed visual description (required)
+   - negative_prompt: Things to avoid (optional)
+   - style_tags: List like ["photorealistic", "dramatic"] (optional)
+   - mood: Overall emotional tone (optional)
+   - subject: Main subject description (optional)
+   - background: Background/setting (optional)
+   - lighting: Lighting description (optional)
+   - aspect_ratio: Like "16:9" (optional, default: "16:9")
+   - quality: "high" or "ultra" (optional, default: "high")
+
+The tool automatically saves properly formatted JSON to the database.
+This is the ONLY correct way to complete image_prompt tasks."""
 
         elif prompt_type == 'lyrics_prompt':
             json_schema_instructions['schema'] = """
 
-IMPORTANT: For lyrics prompts, use the generate_lyrics_json() tool to create properly formatted JSON.
-This tool takes parameters for title, genre, mood, tempo, song structure, and musical metadata.
-Discuss and refine the lyrics collaboratively, then call generate_lyrics_json() with your final composition.
+🎵 CRITICAL INSTRUCTION FOR LYRICS PROMPTS 🎵
 
-Example workflow:
-1. Discuss and brainstorm the song concept, theme, message
-2. Write the lyrics for verses, choruses, and other sections
-3. Refine the musical direction (genre, mood, tempo, instrumentation)
-4. Call generate_lyrics_json() with the complete structure
+You MUST use the generate_lyrics_json() tool to complete this task.
+DO NOT output raw JSON text. DO NOT try to format JSON yourself.
+The generate_lyrics_json() tool handles all formatting automatically.
 
-The structure parameter should be a list like:
-[
-  {"type": "verse", "number": 1, "lyrics": "first verse lyrics here..."},
-  {"type": "chorus", "lyrics": "chorus lyrics here..."},
-  {"type": "verse", "number": 2, "lyrics": "second verse lyrics..."}
-]
+Workflow:
+1. Collaborate to discuss song concept, theme, message, emotional tone
+2. Research if needed using web_research_tool()
+3. Write the actual lyrics for verses, choruses, bridge, etc.
+4. When ready, ONE agent should call generate_lyrics_json() with these parameters:
+   - title: Song title (required)
+   - genre: Music genre like "punk rock", "hip-hop" (required)
+   - mood: Emotional mood like "angry", "melancholic" (required)
+   - tempo: "slow", "medium", or "fast" (required)
+   - structure: List of song sections (required), format:
+     [
+       {"type": "verse", "number": 1, "lyrics": "verse 1 lyrics..."},
+       {"type": "chorus", "lyrics": "chorus lyrics..."},
+       {"type": "verse", "number": 2, "lyrics": "verse 2 lyrics..."},
+       {"type": "bridge", "lyrics": "bridge lyrics..."}
+     ]
+   - key: Musical key like "Am", "G major" (optional)
+   - time_signature: Like "4/4", "3/4" (optional, default: "4/4")
+   - vocal_style: Description of vocal delivery (optional)
+   - instrumentation: List like ["guitar", "drums", "bass"] (optional)
 
-The tool will automatically save the structured JSON to the database."""
+The tool automatically saves properly formatted JSON to the database.
+This is the ONLY correct way to complete lyrics_prompt tasks."""
 
         for agent_config in self.config['agents']:
             if agent_config['type'] == 'UserProxyAgent':
