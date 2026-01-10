@@ -652,45 +652,38 @@ class PoetsService:
         if prompt_type == 'image_prompt':
             json_schema_instructions['schema'] = """
 
-IMPORTANT: Your final output must be valid JSON following this schema:
-{
-  "prompt": "detailed image description with style, composition, lighting",
-  "negative_prompt": "things to avoid in the image",
-  "style_tags": ["tag1", "tag2", "tag3"],
-  "technical_params": {
-    "aspect_ratio": "16:9",
-    "quality": "high",
-    "mood": "describe the mood"
-  },
-  "composition": {
-    "subject": "main subject description",
-    "background": "background setting",
-    "lighting": "lighting description"
-  }
-}
-When ready, the ContentManager should save this JSON to the database."""
+IMPORTANT: For image prompts, use the generate_image_json() tool to create properly formatted JSON.
+This tool takes parameters for prompt, negative_prompt, style_tags, and composition details.
+Discuss and refine the image concept collaboratively, then call generate_image_json() with your final vision.
+
+Example workflow:
+1. Discuss and brainstorm the image concept
+2. Refine the visual details, mood, composition
+3. Call generate_image_json() with all the details
+
+The tool will automatically save the structured JSON to the database."""
 
         elif prompt_type == 'lyrics_prompt':
             json_schema_instructions['schema'] = """
 
-IMPORTANT: Your final output must be valid JSON following this schema:
-{
-  "title": "Song Title",
-  "genre": "genre name",
-  "mood": "emotional mood",
-  "tempo": "slow/medium/fast",
-  "structure": [
-    {"type": "verse", "number": 1, "lyrics": "verse lyrics here..."},
-    {"type": "chorus", "lyrics": "chorus lyrics here..."}
-  ],
-  "metadata": {
-    "key": "musical key",
-    "time_signature": "4/4",
-    "vocal_style": "vocal description",
-    "instrumentation": ["instrument1", "instrument2"]
-  }
-}
-When ready, the ContentManager should save this JSON to the database."""
+IMPORTANT: For lyrics prompts, use the generate_lyrics_json() tool to create properly formatted JSON.
+This tool takes parameters for title, genre, mood, tempo, song structure, and musical metadata.
+Discuss and refine the lyrics collaboratively, then call generate_lyrics_json() with your final composition.
+
+Example workflow:
+1. Discuss and brainstorm the song concept, theme, message
+2. Write the lyrics for verses, choruses, and other sections
+3. Refine the musical direction (genre, mood, tempo, instrumentation)
+4. Call generate_lyrics_json() with the complete structure
+
+The structure parameter should be a list like:
+[
+  {"type": "verse", "number": 1, "lyrics": "first verse lyrics here..."},
+  {"type": "chorus", "lyrics": "chorus lyrics here..."},
+  {"type": "verse", "number": 2, "lyrics": "second verse lyrics..."}
+]
+
+The tool will automatically save the structured JSON to the database."""
 
         for agent_config in self.config['agents']:
             if agent_config['type'] == 'UserProxyAgent':
@@ -859,7 +852,142 @@ When ready, the ContentManager should save this JSON to the database."""
                 error_msg = f"❌ Research error for {agent_name}: {str(e)}"
                 self.logger.error(error_msg)
                 return error_msg, ""
-        
+
+        # Image prompt JSON generation tool
+        def generate_image_json(
+            prompt: str,
+            negative_prompt: str = "",
+            style_tags: Optional[List[str]] = None,
+            aspect_ratio: str = "16:9",
+            quality: str = "high",
+            mood: str = "",
+            subject: str = "",
+            background: str = "",
+            lighting: str = ""
+        ) -> Tuple[str, int]:
+            """
+            Generate structured JSON for image generation prompts.
+
+            Args:
+                prompt: Detailed image description with style, composition, lighting
+                negative_prompt: Things to avoid in the image
+                style_tags: List of style tags (e.g., ["photorealistic", "cinematic", "dramatic"])
+                aspect_ratio: Image aspect ratio (default: "16:9")
+                quality: Image quality level (default: "high")
+                mood: Overall mood of the image
+                subject: Main subject description
+                background: Background setting description
+                lighting: Lighting description
+
+            Returns:
+                Tuple[str, int]: (status_message, writing_id)
+            """
+            import json
+
+            # Build the JSON structure
+            image_json = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "style_tags": style_tags or [],
+                "technical_params": {
+                    "aspect_ratio": aspect_ratio,
+                    "quality": quality,
+                    "mood": mood
+                },
+                "composition": {
+                    "subject": subject,
+                    "background": background,
+                    "lighting": lighting
+                }
+            }
+
+            # Convert to formatted JSON string
+            json_content = json.dumps(image_json, indent=2)
+
+            # Save to database
+            prompt_id = prompt_data.get('id', 'unknown') if prompt_data else 'unknown'
+            prompt_text = prompt_data.get('prompt_text', '')[:50] if prompt_data else ''
+
+            status_msg, writing_id = save_to_sqlite_database(
+                content=json_content,
+                db_path=self.config['database']['path'],
+                title=f"Image Prompt: {prompt_text}...",
+                content_type='image_prompt',
+                publication_status='draft',
+                notes=f"Structured JSON image prompt for offline media generation (Prompt #{prompt_id}). Generated by {agent_name}."
+            )
+
+            self.logger.info(f"📸 {agent_name} generated image JSON for prompt #{prompt_id}, writing #{writing_id}")
+            return status_msg, writing_id
+
+        # Lyrics prompt JSON generation tool
+        def generate_lyrics_json(
+            title: str,
+            genre: str,
+            mood: str,
+            tempo: str,
+            structure: List[Dict[str, Any]],
+            key: str = "",
+            time_signature: str = "4/4",
+            vocal_style: str = "",
+            instrumentation: Optional[List[str]] = None
+        ) -> Tuple[str, int]:
+            """
+            Generate structured JSON for lyrics/music generation prompts.
+
+            Args:
+                title: Song title
+                genre: Music genre (e.g., "punk rock", "hip-hop", "folk")
+                mood: Emotional mood (e.g., "angry", "melancholic", "uplifting")
+                tempo: Tempo descriptor ("slow", "medium", "fast")
+                structure: List of song sections, each with 'type', 'number' (optional), and 'lyrics'
+                    Example: [
+                        {"type": "verse", "number": 1, "lyrics": "verse 1 lyrics..."},
+                        {"type": "chorus", "lyrics": "chorus lyrics..."}
+                    ]
+                key: Musical key (e.g., "Am", "G major")
+                time_signature: Time signature (default: "4/4")
+                vocal_style: Vocal style description
+                instrumentation: List of instruments
+
+            Returns:
+                Tuple[str, int]: (status_message, writing_id)
+            """
+            import json
+
+            # Build the JSON structure
+            lyrics_json = {
+                "title": title,
+                "genre": genre,
+                "mood": mood,
+                "tempo": tempo,
+                "structure": structure,
+                "metadata": {
+                    "key": key,
+                    "time_signature": time_signature,
+                    "vocal_style": vocal_style,
+                    "instrumentation": instrumentation or []
+                }
+            }
+
+            # Convert to formatted JSON string
+            json_content = json.dumps(lyrics_json, indent=2)
+
+            # Save to database
+            prompt_id = prompt_data.get('id', 'unknown') if prompt_data else 'unknown'
+
+            status_msg, writing_id = save_to_sqlite_database(
+                content=json_content,
+                db_path=self.config['database']['path'],
+                title=f"Lyrics: {title}",
+                content_type='lyrics_prompt',
+                publication_status='draft',
+                notes=f"Structured JSON lyrics prompt for offline media generation (Prompt #{prompt_id}). Generated by {agent_name}."
+            )
+
+            self.logger.info(f"🎵 {agent_name} generated lyrics JSON for prompt #{prompt_id}, writing #{writing_id}")
+            return status_msg, writing_id
+
         # Register functions based on agent type
         if isinstance(agent, autogen.UserProxyAgent):
             # UserProxyAgent: Only execution functions
@@ -869,6 +997,8 @@ When ready, the ContentManager should save this JSON to the database."""
             agent.register_for_execution()(query_database)
             agent.register_for_execution()(get_stats)
             agent.register_for_execution()(web_research_tool)
+            agent.register_for_execution()(generate_image_json)
+            agent.register_for_execution()(generate_lyrics_json)
             self.logger.info(f"✅ Execution registration complete for {agent_name}")
             
         elif isinstance(agent, autogen.AssistantAgent):
@@ -898,7 +1028,74 @@ When ready, the ContentManager should save this JSON to the database."""
             - web_research_tool("weather in Paris", "context_search") - for location-specific details
             
             Always use this when you need current, real-world information for your writing.""")(web_research_tool)
-            self.logger.info(f"✅ LLM registration complete for {agent_name} (including web_research_tool)")
+
+            # Image JSON generation tool
+            agent.register_for_llm(description="""Generate structured JSON for image generation prompts.
+            Use this tool when creating image_prompt content to produce properly formatted JSON.
+
+            Required parameters:
+            - prompt: Detailed image description with style, composition, lighting
+            - negative_prompt: Things to avoid in the image (optional, default: "")
+            - style_tags: List of style descriptors (optional, e.g., ["photorealistic", "cinematic"])
+            - aspect_ratio: Image dimensions (optional, default: "16:9")
+            - quality: Quality level (optional, default: "high")
+            - mood: Overall mood descriptor (optional)
+            - subject: Main subject description (optional)
+            - background: Background setting (optional)
+            - lighting: Lighting description (optional)
+
+            Example:
+            generate_image_json(
+                prompt="A surreal landscape with glowing trees under starlit sky",
+                negative_prompt="blurry, low quality, distorted",
+                style_tags=["surreal", "fantasy", "vibrant"],
+                mood="dreamlike",
+                subject="mystical forest",
+                background="night sky with aurora",
+                lighting="soft bioluminescent glow"
+            )
+
+            This automatically saves the JSON to the database with proper formatting.""")(generate_image_json)
+
+            # Lyrics JSON generation tool
+            agent.register_for_llm(description="""Generate structured JSON for lyrics/music generation prompts.
+            Use this tool when creating lyrics_prompt content to produce properly formatted JSON.
+
+            Required parameters:
+            - title: Song title
+            - genre: Music genre (e.g., "punk rock", "hip-hop", "folk")
+            - mood: Emotional mood (e.g., "angry", "melancholic", "uplifting")
+            - tempo: Tempo descriptor ("slow", "medium", "fast")
+            - structure: List of song sections with type, number (optional), and lyrics
+                Format: [
+                    {"type": "verse", "number": 1, "lyrics": "first verse lyrics..."},
+                    {"type": "chorus", "lyrics": "chorus lyrics..."},
+                    {"type": "verse", "number": 2, "lyrics": "second verse..."}
+                ]
+
+            Optional parameters:
+            - key: Musical key (e.g., "Am", "G major")
+            - time_signature: Time signature (default: "4/4")
+            - vocal_style: Vocal style description
+            - instrumentation: List of instruments
+
+            Example:
+            generate_lyrics_json(
+                title="Rage Against ICE",
+                genre="punk rock",
+                mood="angry",
+                tempo="fast",
+                structure=[
+                    {"type": "verse", "number": 1, "lyrics": "They came in the night..."},
+                    {"type": "chorus", "lyrics": "No justice, no peace..."}
+                ],
+                vocal_style="aggressive shouting",
+                instrumentation=["distorted guitar", "bass", "drums"]
+            )
+
+            This automatically saves the JSON to the database with proper formatting.""")(generate_lyrics_json)
+
+            self.logger.info(f"✅ LLM registration complete for {agent_name} (including media JSON tools)")
             
         else:
             self.logger.warning(f"⚠️ Unknown agent type for {agent_name}: {type(agent).__name__}")
@@ -1079,9 +1276,55 @@ When ready, the ContentManager should save this JSON to the database."""
 
             # Post-processing for media prompts (image_prompt, lyrics_prompt)
             if prompt_type in ['image_prompt', 'lyrics_prompt']:
-                self.logger.info(f"Extracting and validating JSON for {prompt_type} #{prompt_id}")
+                self.logger.info(f"Checking for generated JSON for {prompt_type} #{prompt_id}")
 
-                # Extract and validate JSON from conversation
+                # First check if agents already saved JSON via generate_image_json/generate_lyrics_json tools
+                conn = self.get_database_connection()
+                try:
+                    cursor = conn.cursor()
+                    # Look for recently created writings with this prompt type
+                    cursor.execute(
+                        """SELECT id, content FROM writings
+                           WHERE content_type = ?
+                           AND created_date >= datetime('now', '-5 minutes')
+                           AND notes LIKE ?
+                           ORDER BY id DESC LIMIT 1""",
+                        (prompt_type, f"%Prompt #{prompt_id}%")
+                    )
+                    result = cursor.fetchone()
+
+                    if result:
+                        writing_id = result[0]
+                        self.logger.info(f"Found JSON writing #{writing_id} created by tools during conversation")
+
+                        # Link the writing to the prompt
+                        cursor.execute(
+                            "UPDATE prompts SET output_reference = ? WHERE id = ?",
+                            (writing_id, prompt_id)
+                        )
+                        cursor.execute(
+                            "UPDATE writings SET source_prompt_id = ? WHERE id = ?",
+                            (prompt_id, writing_id)
+                        )
+                        conn.commit()
+
+                        # Mark as completed with pending artifact status
+                        self.update_prompt_status(
+                            prompt_id,
+                            'completed',
+                            artifact_status='pending'
+                        )
+                        self.logger.info(
+                            f"Structured prompt generation completed for #{prompt_id}, "
+                            f"writing #{writing_id}, marked as pending for media generation"
+                        )
+                        return True
+                    else:
+                        self.logger.info("No writing found from tools, attempting JSON extraction from conversation")
+                finally:
+                    conn.close()
+
+                # Fallback: Extract and validate JSON from conversation messages
                 success, json_content, writing_id = self._extract_and_validate_json(
                     groupchat, prompt_data, prompt_type
                 )
@@ -1103,7 +1346,7 @@ When ready, the ContentManager should save this JSON to the database."""
                     self.update_prompt_status(
                         prompt_id,
                         'failed',
-                        'Failed to extract or validate JSON from conversation'
+                        'Failed to extract or validate JSON from conversation. Agents should use generate_image_json() or generate_lyrics_json() tools.'
                     )
                     self.logger.error(f"JSON extraction failed for prompt #{prompt_id}")
                     return False
