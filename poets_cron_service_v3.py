@@ -642,10 +642,56 @@ class PoetsService:
     def create_agents(self, config_lists: Dict[str, List[Dict]], prompt_data: Dict = None) -> List[autogen.Agent]:
         """Create autogen agents from configuration"""
         agents = []
-        
+
         # Customize system messages based on prompt type if provided
         prompt_type = prompt_data.get('prompt_type', 'text') if prompt_data else 'text'
-        
+
+        # Define JSON schema instructions for structured prompts
+        json_schema_instructions = {}
+
+        if prompt_type == 'image_prompt':
+            json_schema_instructions['schema'] = """
+
+IMPORTANT: Your final output must be valid JSON following this schema:
+{
+  "prompt": "detailed image description with style, composition, lighting",
+  "negative_prompt": "things to avoid in the image",
+  "style_tags": ["tag1", "tag2", "tag3"],
+  "technical_params": {
+    "aspect_ratio": "16:9",
+    "quality": "high",
+    "mood": "describe the mood"
+  },
+  "composition": {
+    "subject": "main subject description",
+    "background": "background setting",
+    "lighting": "lighting description"
+  }
+}
+When ready, the ContentManager should save this JSON to the database."""
+
+        elif prompt_type == 'lyrics_prompt':
+            json_schema_instructions['schema'] = """
+
+IMPORTANT: Your final output must be valid JSON following this schema:
+{
+  "title": "Song Title",
+  "genre": "genre name",
+  "mood": "emotional mood",
+  "tempo": "slow/medium/fast",
+  "structure": [
+    {"type": "verse", "number": 1, "lyrics": "verse lyrics here..."},
+    {"type": "chorus", "lyrics": "chorus lyrics here..."}
+  ],
+  "metadata": {
+    "key": "musical key",
+    "time_signature": "4/4",
+    "vocal_style": "vocal description",
+    "instrumentation": ["instrument1", "instrument2"]
+  }
+}
+When ready, the ContentManager should save this JSON to the database."""
+
         for agent_config in self.config['agents']:
             if agent_config['type'] == 'UserProxyAgent':
                 system_message = agent_config['system_message']
@@ -653,6 +699,10 @@ class PoetsService:
                     system_message += f" Focus on {prompt_type} content generation."
                 # Add explicit tool availability notice
                 system_message += " You have access to web_research_tool() for current information and research."
+
+                # Add JSON schema instructions for media prompts
+                if 'schema' in json_schema_instructions:
+                    system_message += json_schema_instructions['schema']
                 
                 agent = autogen.UserProxyAgent(
                     name=agent_config['name'],
@@ -685,7 +735,11 @@ class PoetsService:
                         system_message += "."
                 # Add explicit tool availability notice for AssistantAgents
                 system_message += " You have access to web_research_tool() for researching current information."
-                
+
+                # Add JSON schema instructions for media prompts
+                if 'schema' in json_schema_instructions:
+                    system_message += json_schema_instructions['schema']
+
                 agent = autogen.AssistantAgent(
                     name=agent_config['name'],
                     system_message=system_message,
@@ -849,241 +903,120 @@ class PoetsService:
         else:
             self.logger.warning(f"⚠️ Unknown agent type for {agent_name}: {type(agent).__name__}")
 
-    def _create_structured_prompt_agents(self, config_lists: Dict, prompt_data: Dict) -> List:
+    def _extract_and_validate_json(
+        self,
+        groupchat: autogen.GroupChat,
+        prompt_data: Dict,
+        prompt_type: str
+    ) -> Tuple[bool, Optional[str], Optional[int]]:
         """
-        Create specialized agents for generating structured JSON prompts.
-        These agents are instructed to output valid JSON for image/lyrics prompts.
+        Extract and validate JSON from group chat messages.
+
+        Returns:
+            (success, json_content, writing_id)
         """
-        agents = []
-        prompt_type = prompt_data.get('prompt_type', 'text')
+        import re
 
-        # Determine JSON schema based on prompt type
-        if prompt_type == 'image_prompt':
-            json_instruction = """
-            You must output ONLY valid JSON following this exact schema:
-            {
-                "prompt": "detailed image description with style, composition, lighting",
-                "negative_prompt": "things to avoid in the image",
-                "style_tags": ["tag1", "tag2", "tag3"],
-                "technical_params": {
-                    "aspect_ratio": "16:9",
-                    "quality": "high",
-                    "mood": "describe the mood"
-                },
-                "composition": {
-                    "subject": "main subject description",
-                    "background": "background setting",
-                    "lighting": "lighting description"
-                }
-            }
+        prompt_id = prompt_data['id']
+        self.logger.info(f"Extracting JSON from conversation for prompt #{prompt_id}")
 
-            Create a vivid, detailed image prompt based on the user's request.
-            Output ONLY the JSON object, no other text.
-            """
-        elif prompt_type == 'lyrics_prompt':
-            json_instruction = """
-            You must output ONLY valid JSON following this exact schema:
-            {
-                "title": "Song Title",
-                "genre": "genre name",
-                "mood": "emotional mood",
-                "tempo": "slow/medium/fast",
-                "structure": [
-                    {"type": "verse", "number": 1, "lyrics": "verse lyrics here..."},
-                    {"type": "chorus", "lyrics": "chorus lyrics here..."}
-                ],
-                "metadata": {
-                    "key": "musical key",
-                    "time_signature": "4/4",
-                    "vocal_style": "vocal description",
-                    "instrumentation": ["instrument1", "instrument2"]
-                }
-            }
+        # Iterate through messages in reverse to get the most recent JSON
+        json_candidates = []
 
-            Create complete song lyrics with structure based on the user's request.
-            Output ONLY the JSON object, no other text.
-            """
-        else:
-            json_instruction = "Output valid JSON based on the user's request."
-
-        # Create modified agent configurations with JSON instruction
-        for agent_config in self.config.get('agents', []):
-            agent_name = agent_config['name']
-            agent_type = agent_config['type']
-
-            # Skip ContentManager for structured prompts - we only need the creative agents
-            if agent_type == 'UserProxyAgent':
+        for message in reversed(groupchat.messages):
+            content = message.get('content', '')
+            if not content:
                 continue
 
-            # Add JSON instruction to system message
-            original_system_message = agent_config.get('system_message', '')
-            enhanced_system_message = f"{original_system_message}\n\n{json_instruction}"
+            # Strategy 1: Look for JSON in markdown code blocks
+            json_block_pattern = r'```json\s*(\{.*?\})\s*```'
+            matches = re.findall(json_block_pattern, content, re.DOTALL)
+            json_candidates.extend(matches)
 
-            # Get config assignment
-            config_assignment = agent_config.get('config_assignment', 'none')
-            llm_config = None
+            # Strategy 2: Look for plain JSON starting with '{'
+            if content.strip().startswith('{'):
+                json_candidates.append(content.strip())
 
-            if config_assignment != 'none' and config_assignment in config_lists:
-                llm_config = {"config_list": config_lists[config_assignment]}
+            # Strategy 3: Look for any JSON object in the content
+            json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+            matches = re.findall(json_pattern, content, re.DOTALL)
+            json_candidates.extend(matches)
 
-            # Create agent
-            if agent_type == 'AssistantAgent':
-                agent = autogen.AssistantAgent(
-                    name=agent_name,
-                    system_message=enhanced_system_message,
-                    llm_config=llm_config
-                )
-                agents.append(agent)
-                self.logger.info(f"Created structured prompt agent: {agent_name}")
+        if not json_candidates:
+            self.logger.error(f"No JSON content found in conversation for prompt #{prompt_id}")
+            return (False, None, None)
 
-        return agents
-
-    def _run_structured_prompt_generation(self, base_url: str, prompt_data: Dict) -> bool:
-        """
-        Generate structured JSON prompts for image/lyrics that will be processed
-        by the offline ComfyUI app. Saves JSON as text to the database.
-        """
-        try:
-            prompt_id = prompt_data['id']
-            prompt_text = prompt_data['prompt_text']
-            prompt_type = prompt_data.get('prompt_type', 'text')
-
-            self.logger.info(f"Starting structured prompt generation for #{prompt_id} ({prompt_type})")
-
-            # Update status to processing
-            self.update_prompt_status(prompt_id, 'processing')
-
-            # Create configuration lists
-            config_lists = self.create_config_lists(base_url)
-
-            # Create specialized agents for structured output
-            agents = self._create_structured_prompt_agents(config_lists, prompt_data)
-
-            if len(agents) < 1:
-                self.logger.error("Need at least 1 agent for structured prompt generation")
-                self.update_prompt_status(prompt_id, 'failed', 'No agents available')
-                return False
-
-            # Build the prompt
-            enhanced_prompt = f"Create a structured {prompt_type} based on: {prompt_text}"
-
-            # For structured prompts, use a simpler setup - direct agent chat
-            # Since we only need JSON output, we don't need complex group chat
-            primary_agent = agents[0]
-
-            # Create a simple user proxy to receive the response
-            user_proxy = autogen.UserProxyAgent(
-                name="StructuredPromptCollector",
-                human_input_mode="NEVER",
-                max_consecutive_auto_reply=0,
-                code_execution_config=False
-            )
-
-            # Initiate chat
-            user_proxy.initiate_chat(
-                primary_agent,
-                message=enhanced_prompt,
-                max_turns=1
-            )
-
-            # Extract the JSON response from chat history
-            # AutoGen stores messages as: user_proxy.chat_messages[agent] = list of messages
-            # We want the last message from the agent (the assistant's response)
-            chat_history = user_proxy.chat_messages.get(primary_agent, [])
-            json_response = None
-
-            # Look for the agent's response (last non-user message with content)
-            for message in reversed(chat_history):
-                # In AutoGen, agent responses have 'name' field matching the agent name
-                if message.get('name') == primary_agent.name and message.get('content'):
-                    json_response = message['content'].strip()
-                    self.logger.info(f"Extracted JSON response ({len(json_response)} chars)")
-                    break
-
-            if not json_response or not json_response.startswith('{'):
-                self.logger.error(f"No valid JSON response received from agent for prompt #{prompt_id}")
-                self.update_prompt_status(prompt_id, 'failed', 'No valid JSON response from agent')
-                return False
-
-            # Validate that the JSON is actually parseable
+        # Try to parse and validate each candidate (most recent first)
+        for idx, json_str in enumerate(json_candidates):
             try:
-                parsed_json = json.loads(json_response)
-                self.logger.info(f"JSON validation passed for prompt #{prompt_id}")
+                parsed_json = json.loads(json_str)
+                self.logger.info(f"Successfully parsed JSON candidate #{idx+1} for prompt #{prompt_id}")
 
-                # Verify required fields based on prompt type
+                # Validate required fields based on prompt_type
                 if prompt_type == 'lyrics_prompt':
                     required_fields = ['title', 'genre', 'mood', 'tempo', 'structure']
                     missing_fields = [field for field in required_fields if field not in parsed_json]
                     if missing_fields:
-                        self.logger.error(f"Missing required fields in lyrics JSON: {missing_fields}")
-                        self.update_prompt_status(
-                            prompt_id, 'failed',
-                            f'Invalid lyrics JSON: missing fields {missing_fields}'
+                        self.logger.warning(
+                            f"JSON candidate #{idx+1} missing required lyrics fields: {missing_fields}"
                         )
-                        return False
+                        continue
+
                 elif prompt_type == 'image_prompt':
                     required_fields = ['prompt']
                     missing_fields = [field for field in required_fields if field not in parsed_json]
                     if missing_fields:
-                        self.logger.error(f"Missing required fields in image JSON: {missing_fields}")
-                        self.update_prompt_status(
-                            prompt_id, 'failed',
-                            f'Invalid image JSON: missing fields {missing_fields}'
+                        self.logger.warning(
+                            f"JSON candidate #{idx+1} missing required image fields: {missing_fields}"
                         )
-                        return False
+                        continue
+
+                # Valid JSON found! Save to database
+                self.logger.info(f"Valid JSON found for prompt #{prompt_id}, saving to database")
+
+                status_msg, writing_id = save_to_sqlite_database(
+                    content=json_str,
+                    db_path=self.config['database']['path'],
+                    title=f"{prompt_type.replace('_', ' ').title()}: {prompt_data['prompt_text'][:50]}...",
+                    content_type=prompt_type,
+                    publication_status='draft',
+                    notes=f"Structured JSON prompt for offline media generation (Prompt #{prompt_id})"
+                )
+
+                self.logger.info(status_msg)
+
+                # Link the writing to the prompt
+                if writing_id > 0:
+                    conn = self.get_database_connection()
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE prompts SET output_reference = ? WHERE id = ?",
+                            (writing_id, prompt_id)
+                        )
+                        cursor.execute(
+                            "UPDATE writings SET source_prompt_id = ? WHERE id = ?",
+                            (prompt_id, writing_id)
+                        )
+                        conn.commit()
+                        self.logger.info(f"Linked writing #{writing_id} to prompt #{prompt_id}")
+                    finally:
+                        conn.close()
+
+                    return (True, json_str, writing_id)
+                else:
+                    self.logger.error(f"Failed to save JSON to database for prompt #{prompt_id}")
+                    return (False, None, None)
 
             except json.JSONDecodeError as e:
-                self.logger.error(f"Invalid JSON from agent for prompt #{prompt_id}: {e}")
-                self.logger.error(f"Malformed JSON content (first 500 chars): {json_response[:500]}")
-                self.update_prompt_status(
-                    prompt_id, 'failed',
-                    f'Agent returned invalid JSON: {str(e)}'
-                )
-                return False
+                self.logger.debug(f"JSON candidate #{idx+1} failed to parse: {e}")
+                continue
+            except Exception as e:
+                self.logger.error(f"Error processing JSON candidate #{idx+1}: {e}")
+                continue
 
-            # Save the JSON to the database
-            from tools import save_to_sqlite_database
-
-            db_path = self.config.get('database', {}).get('path')
-            status_msg, writing_id = save_to_sqlite_database(
-                content=json_response,
-                db_path=db_path,
-                title=f"{prompt_type.replace('_', ' ').title()}: {prompt_text[:50]}...",
-                content_type=prompt_type,
-                publication_status='draft',
-                notes=f"Structured JSON prompt for offline media generation (Prompt #{prompt_id})"
-            )
-
-            self.logger.info(status_msg)
-
-            # Link the writing to the prompt
-            if writing_id > 0:
-                conn = self.get_database_connection()
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "UPDATE prompts SET output_reference = ? WHERE id = ?",
-                        (writing_id, prompt_id)
-                    )
-                    cursor.execute(
-                        "UPDATE writings SET source_prompt_id = ? WHERE id = ?",
-                        (prompt_id, writing_id)
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-
-                self.logger.info(f"Linked writing #{writing_id} to prompt #{prompt_id}")
-
-            # Mark as completed with artifact_status='pending' so offline app knows to process it
-            self.update_prompt_status(prompt_id, 'completed', artifact_status='pending')
-            self.logger.info(f"Structured prompt generation completed for #{prompt_id}, marked as pending for media generation")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error in structured prompt generation: {str(e)}")
-            self.update_prompt_status(prompt_id, 'failed', str(e))
-            return False
+        self.logger.error(f"No valid JSON found in conversation for prompt #{prompt_id}")
+        return (False, None, None)
 
     def run_generation_session(self, base_url: str, prompt_data: Dict) -> bool:
         """Run a content generation session for a specific prompt"""
@@ -1091,11 +1024,6 @@ class PoetsService:
             prompt_id = prompt_data['id']
             prompt_text = prompt_data['prompt_text']
             prompt_type = prompt_data.get('prompt_type', 'text')
-
-            # Route structured prompt types to specialized handler
-            if prompt_type in ['image_prompt', 'lyrics_prompt']:
-                self.logger.info(f"Routing {prompt_type} #{prompt_id} to structured prompt generation")
-                return self._run_structured_prompt_generation(base_url, prompt_data)
 
             self.logger.info(f"Starting generation for prompt #{prompt_id}: {prompt_text[:100]}...")
 
@@ -1148,11 +1076,42 @@ class PoetsService:
             
             # Start the chat
             agents[0].initiate_chat(manager, message=enhanced_prompt)
-            
-            # Mark as completed
-            self.update_prompt_status(prompt_id, 'completed')
-            self.logger.info(f"Generation completed successfully for prompt #{prompt_id}")
-            return True
+
+            # Post-processing for media prompts (image_prompt, lyrics_prompt)
+            if prompt_type in ['image_prompt', 'lyrics_prompt']:
+                self.logger.info(f"Extracting and validating JSON for {prompt_type} #{prompt_id}")
+
+                # Extract and validate JSON from conversation
+                success, json_content, writing_id = self._extract_and_validate_json(
+                    groupchat, prompt_data, prompt_type
+                )
+
+                if success:
+                    # Mark as completed with pending artifact status for offline media processing
+                    self.update_prompt_status(
+                        prompt_id,
+                        'completed',
+                        artifact_status='pending'
+                    )
+                    self.logger.info(
+                        f"Structured prompt generation completed for #{prompt_id}, "
+                        f"writing #{writing_id}, marked as pending for media generation"
+                    )
+                    return True
+                else:
+                    # Mark as failed if JSON extraction/validation failed
+                    self.update_prompt_status(
+                        prompt_id,
+                        'failed',
+                        'Failed to extract or validate JSON from conversation'
+                    )
+                    self.logger.error(f"JSON extraction failed for prompt #{prompt_id}")
+                    return False
+            else:
+                # Regular prompts - just mark as completed
+                self.update_prompt_status(prompt_id, 'completed')
+                self.logger.info(f"Generation completed successfully for prompt #{prompt_id}")
+                return True
             
         except Exception as e:
             self.logger.error(f"Error in generation session: {str(e)}")
