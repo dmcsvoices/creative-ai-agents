@@ -1304,7 +1304,9 @@ generate_image_json(
 
 IMPORTANT: The generate_image_json() function automatically saves to the database.
 DO NOT also call save_to_database() - it will create duplicate/conflicting entries.
-This is the ONLY way to successfully complete this task. Do NOT output JSON as text."""
+This is the ONLY way to successfully complete this task. Do NOT output JSON as text.
+
+AFTER the generate_image_json() tool is successfully called, respond with "TERMINATE" to end the conversation."""
 
             elif prompt_type == 'lyrics_prompt':
                 initial_message = f"""Task: {enhanced_prompt}
@@ -1328,7 +1330,9 @@ generate_lyrics_json(
 
 IMPORTANT: The generate_lyrics_json() function automatically saves to the database.
 DO NOT also call save_to_database() - it will create duplicate/conflicting entries.
-This is the ONLY way to successfully complete this task. Do NOT output JSON as text."""
+This is the ONLY way to successfully complete this task. Do NOT output JSON as text.
+
+AFTER the generate_lyrics_json() tool is successfully called, respond with "TERMINATE" to end the conversation."""
 
             else:
                 initial_message = f"Create {prompt_type} content based on this prompt: {enhanced_prompt}"
