@@ -154,9 +154,6 @@ class PoetsService:
         self.media_prompt_type_map: Dict[str, str] = {}
         self.media_available = False
 
-        # Initialize database tables
-        self.initialize_database()
-
         if self.media_enabled:
             try:
                 self._initialize_media_support()
@@ -417,9 +414,20 @@ class PoetsService:
             if not cursor.fetchone():
                 self.logger.info("No prompts table found - creating it")
                 self.create_prompts_table(cursor)
+                self.create_prompt_writings_table(cursor)
                 conn.commit()
                 conn.close()
                 return []
+
+            # Ensure junction table exists (for existing databases)
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='prompt_writings'
+            """)
+            if not cursor.fetchone():
+                self.logger.info("Creating prompt_writings junction table")
+                self.create_prompt_writings_table(cursor)
+                conn.commit()
             
             # Get unprocessed prompts ordered by priority and creation time
             cursor.execute("""
@@ -582,55 +590,6 @@ class PoetsService:
             ON prompt_writings(writing_id)
         """)
 
-    def initialize_database(self):
-        """Initialize database tables"""
-        conn = self.get_database_connection()
-        cursor = conn.cursor()
-
-        self.create_prompts_table(cursor)
-        self.create_prompt_writings_table(cursor)
-
-        conn.commit()
-        conn.close()
-
-        # One-time migration
-        self.migrate_existing_prompt_references()
-
-        self.logger.info("Database tables initialized")
-
-    def migrate_existing_prompt_references(self):
-        """One-time migration: backfill prompt_writings from existing output_reference"""
-        conn = self.get_database_connection()
-        try:
-            cursor = conn.cursor()
-
-            # Find all prompts with output_reference but no junction table entry
-            cursor.execute("""
-                SELECT p.id, p.output_reference
-                FROM prompts p
-                WHERE p.output_reference IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM prompt_writings pw
-                    WHERE pw.prompt_id = p.id AND pw.writing_id = p.output_reference
-                )
-            """)
-
-            rows = cursor.fetchall()
-            migrated = 0
-
-            for row in rows:
-                prompt_id, writing_id = row
-                cursor.execute("""
-                    INSERT OR IGNORE INTO prompt_writings (prompt_id, writing_id, writing_order)
-                    VALUES (?, ?, 0)
-                """, (prompt_id, writing_id))
-                migrated += 1
-
-            conn.commit()
-            if migrated > 0:
-                self.logger.info(f"Migrated {migrated} existing prompt references to junction table")
-        finally:
-            conn.close()
 
     def update_prompt_status(
         self,
