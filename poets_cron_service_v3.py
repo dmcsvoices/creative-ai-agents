@@ -656,7 +656,8 @@ class PoetsService:
 
 You MUST use the generate_image_json() tool to complete this task.
 DO NOT output raw JSON text. DO NOT try to format JSON yourself.
-The generate_image_json() tool handles all formatting automatically.
+DO NOT use save_to_database() for this task - generate_image_json() saves automatically.
+The generate_image_json() tool handles all formatting AND database saving.
 
 Workflow:
 1. Collaborate and discuss the image concept, visual style, mood, composition
@@ -682,7 +683,8 @@ This is the ONLY correct way to complete image_prompt tasks."""
 
 You MUST use the generate_lyrics_json() tool to complete this task.
 DO NOT output raw JSON text. DO NOT try to format JSON yourself.
-The generate_lyrics_json() tool handles all formatting automatically.
+DO NOT use save_to_database() for this task - generate_lyrics_json() saves automatically.
+The generate_lyrics_json() tool handles all formatting AND database saving.
 
 Workflow:
 1. Collaborate to discuss song concept, theme, message, emotional tone
@@ -1053,8 +1055,9 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             Always use this when you need current, real-world information for your writing.""")(web_research_tool)
 
             # Image JSON generation tool
-            agent.register_for_llm(description="""Generate structured JSON for image generation prompts.
+            agent.register_for_llm(description="""Generate structured JSON for image generation prompts AND save to database.
             Use this tool when creating image_prompt content to produce properly formatted JSON.
+            This tool automatically saves to the database - DO NOT also call save_to_database().
 
             Required parameters:
             - prompt: Detailed image description with style, composition, lighting
@@ -1081,8 +1084,9 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             This automatically saves the JSON to the database with proper formatting.""")(generate_image_json)
 
             # Lyrics JSON generation tool
-            agent.register_for_llm(description="""Generate structured JSON for lyrics/music generation prompts.
+            agent.register_for_llm(description="""Generate structured JSON for lyrics/music generation prompts AND save to database.
             Use this tool when creating lyrics_prompt content to produce properly formatted JSON.
+            This tool automatically saves to the database - DO NOT also call save_to_database().
 
             Required parameters:
             - title: Song title
@@ -1298,6 +1302,8 @@ generate_image_json(
     lighting="lighting description"
 )
 
+IMPORTANT: The generate_image_json() function automatically saves to the database.
+DO NOT also call save_to_database() - it will create duplicate/conflicting entries.
 This is the ONLY way to successfully complete this task. Do NOT output JSON as text."""
 
             elif prompt_type == 'lyrics_prompt':
@@ -1320,6 +1326,8 @@ generate_lyrics_json(
     instrumentation=["instrument1", "instrument2"]
 )
 
+IMPORTANT: The generate_lyrics_json() function automatically saves to the database.
+DO NOT also call save_to_database() - it will create duplicate/conflicting entries.
 This is the ONLY way to successfully complete this task. Do NOT output JSON as text."""
 
             else:
