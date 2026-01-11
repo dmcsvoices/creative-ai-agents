@@ -1151,7 +1151,12 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             # UserProxyAgent: Only execution functions
             self.logger.info(f"⚙️ Registering execution functions for {agent_name} (UserProxyAgent)")
             agent.register_for_execution()(save_file_function)
-            agent.register_for_execution()(save_to_database)
+
+            # Only register save_to_database for non-media prompts
+            prompt_type = prompt_data.get('prompt_type') if prompt_data else None
+            if prompt_type not in ['image_prompt', 'lyrics_prompt']:
+                agent.register_for_execution()(save_to_database)
+
             agent.register_for_execution()(query_database)
             agent.register_for_execution()(get_stats)
             agent.register_for_execution()(web_research_tool)
@@ -1163,7 +1168,15 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             # AssistantAgent: Only LLM functions
             self.logger.info(f"🤖 Registering LLM functions for {agent_name} (AssistantAgent)")
             agent.register_for_llm(description="Save text content to timestamped file")(save_file_function)
-            agent.register_for_llm(description="Save content to Anthony's Musings database with intelligent analysis")(save_to_database)
+
+            # Only register save_to_database for non-media prompts
+            # For image_prompt and lyrics_prompt, agents must use generate_image_json/generate_lyrics_json
+            prompt_type = prompt_data.get('prompt_type') if prompt_data else None
+            if prompt_type not in ['image_prompt', 'lyrics_prompt']:
+                agent.register_for_llm(description="Save content to Anthony's Musings database with intelligent analysis")(save_to_database)
+            else:
+                self.logger.info(f"   ⚠️  Skipping save_to_database registration for {prompt_type} - agents must use generate_{prompt_type.replace('_prompt', '')}_json()")
+
             agent.register_for_llm(description="Query Anthony's Musings database for existing content")(query_database)
             agent.register_for_llm(description="Get statistics about Anthony's Musings database content")(get_stats)
             
