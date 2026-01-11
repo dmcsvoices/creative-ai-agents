@@ -943,7 +943,9 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             )
 
             self.logger.info(f"📸 {agent_name} generated image JSON for prompt #{prompt_id}, writing #{writing_id}")
-            return status_msg, writing_id
+            # Add TERMINATE to signal conversation should end
+            terminate_msg = status_msg + "\n\nTERMINATE"
+            return terminate_msg, writing_id
 
         # Lyrics prompt JSON generation tool
         def generate_lyrics_json(
@@ -1011,7 +1013,9 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             )
 
             self.logger.info(f"🎵 {agent_name} generated lyrics JSON for prompt #{prompt_id}, writing #{writing_id}")
-            return status_msg, writing_id
+            # Add TERMINATE to signal conversation should end
+            terminate_msg = status_msg + "\n\nTERMINATE"
+            return terminate_msg, writing_id
 
         # Register functions based on agent type
         if isinstance(agent, autogen.UserProxyAgent):
