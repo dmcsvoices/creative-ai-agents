@@ -154,6 +154,9 @@ class PoetsService:
         self.media_prompt_type_map: Dict[str, str] = {}
         self.media_available = False
 
+        # Initialize database tables
+        self.initialize_database()
+
         if self.media_enabled:
             try:
                 self._initialize_media_support()
@@ -446,15 +449,60 @@ class PoetsService:
             self.logger.error(f"Error getting unprocessed prompts: {e}")
             return []
 
+    def get_prompt_writings(self, prompt_id: int) -> List[Dict]:
+        """Get all writings linked to a prompt via junction table
+
+        Returns:
+            List of dicts with writing_id, created_at, writing_order
+        """
+        conn = self.get_database_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    pw.writing_id,
+                    pw.created_at,
+                    pw.writing_order,
+                    w.title,
+                    w.content_type,
+                    w.content
+                FROM prompt_writings pw
+                JOIN writings w ON pw.writing_id = w.id
+                WHERE pw.prompt_id = ?
+                ORDER BY pw.writing_order ASC
+            """, (prompt_id,))
+
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'writing_id': row[0],
+                    'created_at': row[1],
+                    'writing_order': row[2],
+                    'title': row[3],
+                    'content_type': row[4],
+                    'content': row[5]
+                })
+
+            return results
+        finally:
+            conn.close()
+
     def get_pending_media_prompts(self) -> List[Dict]:
-        """Get prompts that need media generation (status='completed', artifact_status='pending')"""
+        """Get prompts that need media generation with ALL their writings"""
         try:
             conn = self.get_database_connection()
             cursor = conn.cursor()
 
             # Get prompts that need media generation
             cursor.execute("""
-                SELECT p.id, p.prompt_text, p.prompt_type, p.priority, p.metadata, p.created_at, p.output_reference
+                SELECT
+                    p.id,
+                    p.prompt_text,
+                    p.prompt_type,
+                    p.priority,
+                    p.metadata,
+                    p.created_at,
+                    p.output_reference
                 FROM prompts p
                 WHERE p.status = 'completed'
                 AND p.artifact_status = 'pending'
@@ -465,15 +513,21 @@ class PoetsService:
 
             prompts = []
             for row in cursor.fetchall():
+                prompt_id = row[0]
                 metadata = json.loads(row[4]) if row[4] else {}
+
+                # Get ALL writings for this prompt via junction table
+                writings = self.get_prompt_writings(prompt_id)
+
                 prompts.append({
-                    'id': row[0],
+                    'id': prompt_id,
                     'prompt_text': row[1],
                     'prompt_type': row[2],
                     'priority': row[3],
                     'metadata': metadata,
                     'created_at': row[5],
-                    'output_reference': row[6]
+                    'output_reference': row[6],  # Backward compatibility
+                    'writings': writings  # ← NEW: All writings for this prompt
                 })
 
             conn.close()
@@ -502,6 +556,81 @@ class PoetsService:
                 processing_duration INTEGER
             )
         """)
+
+    def create_prompt_writings_table(self, cursor):
+        """Create junction table for prompt-to-writing relationships"""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS prompt_writings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt_id INTEGER NOT NULL,
+                writing_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                writing_order INTEGER DEFAULT 0,
+                FOREIGN KEY (prompt_id) REFERENCES prompts(id) ON DELETE CASCADE,
+                FOREIGN KEY (writing_id) REFERENCES writings(id) ON DELETE CASCADE,
+                UNIQUE(prompt_id, writing_id)
+            )
+        """)
+
+        # Create indexes for efficient queries
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_prompt_writings_prompt_id
+            ON prompt_writings(prompt_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_prompt_writings_writing_id
+            ON prompt_writings(writing_id)
+        """)
+
+    def initialize_database(self):
+        """Initialize database tables"""
+        conn = self.get_database_connection()
+        cursor = conn.cursor()
+
+        self.create_prompts_table(cursor)
+        self.create_prompt_writings_table(cursor)
+
+        conn.commit()
+        conn.close()
+
+        # One-time migration
+        self.migrate_existing_prompt_references()
+
+        self.logger.info("Database tables initialized")
+
+    def migrate_existing_prompt_references(self):
+        """One-time migration: backfill prompt_writings from existing output_reference"""
+        conn = self.get_database_connection()
+        try:
+            cursor = conn.cursor()
+
+            # Find all prompts with output_reference but no junction table entry
+            cursor.execute("""
+                SELECT p.id, p.output_reference
+                FROM prompts p
+                WHERE p.output_reference IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM prompt_writings pw
+                    WHERE pw.prompt_id = p.id AND pw.writing_id = p.output_reference
+                )
+            """)
+
+            rows = cursor.fetchall()
+            migrated = 0
+
+            for row in rows:
+                prompt_id, writing_id = row
+                cursor.execute("""
+                    INSERT OR IGNORE INTO prompt_writings (prompt_id, writing_id, writing_order)
+                    VALUES (?, ?, 0)
+                """, (prompt_id, writing_id))
+                migrated += 1
+
+            conn.commit()
+            if migrated > 0:
+                self.logger.info(f"Migrated {migrated} existing prompt references to junction table")
+        finally:
+            conn.close()
 
     def update_prompt_status(
         self,
@@ -1213,21 +1342,40 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
 
                 self.logger.info(status_msg)
 
-                # Link the writing to the prompt
+                # Link the writing to the prompt (via junction table AND output_reference)
                 if writing_id > 0:
                     conn = self.get_database_connection()
                     try:
                         cursor = conn.cursor()
+
+                        # Get current highest order for this prompt
                         cursor.execute(
-                            "UPDATE prompts SET output_reference = ? WHERE id = ?",
-                            (writing_id, prompt_id)
+                            "SELECT COALESCE(MAX(writing_order), -1) FROM prompt_writings WHERE prompt_id = ?",
+                            (prompt_id,)
                         )
+                        max_order = cursor.fetchone()[0]
+                        next_order = max_order + 1
+
+                        # Insert into junction table
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO prompt_writings (prompt_id, writing_id, writing_order)
+                            VALUES (?, ?, ?)
+                        """, (prompt_id, writing_id, next_order))
+
+                        # Update writings table
                         cursor.execute(
                             "UPDATE writings SET source_prompt_id = ? WHERE id = ?",
                             (prompt_id, writing_id)
                         )
+
+                        # Update output_reference to point to this (most recent) writing
+                        cursor.execute(
+                            "UPDATE prompts SET output_reference = ? WHERE id = ?",
+                            (writing_id, prompt_id)
+                        )
+
                         conn.commit()
-                        self.logger.info(f"Linked writing #{writing_id} to prompt #{prompt_id}")
+                        self.logger.info(f"Linked writing #{writing_id} to prompt #{prompt_id} (order: {next_order})")
                     finally:
                         conn.close()
 
@@ -1371,30 +1519,48 @@ AFTER the generate_lyrics_json() tool is successfully called, respond with "TERM
                 try:
                     cursor = conn.cursor()
                     # Look for recently created writings with this prompt type
+                    # Use conversation duration + buffer instead of fixed 5 minutes
+                    # max_processing_time_minutes is 15, add 5 minute buffer = 20 minutes
+                    time_window_minutes = self.config['processing'].get('max_processing_time_minutes', 15) + 5
+
                     cursor.execute(
                         """SELECT id, content FROM writings
                            WHERE content_type = ?
-                           AND created_date >= datetime('now', '-5 minutes')
+                           AND created_date >= datetime('now', ? || ' minutes')
                            AND notes LIKE ?
-                           ORDER BY id DESC LIMIT 1""",
-                        (prompt_type, f"%Prompt #{prompt_id}%")
+                           ORDER BY id ASC""",
+                        (prompt_type, f'-{time_window_minutes}', f"%Prompt #{prompt_id}%")
                     )
-                    result = cursor.fetchone()
+                    results = cursor.fetchall()
 
-                    if result:
-                        writing_id = result[0]
-                        self.logger.info(f"Found JSON writing #{writing_id} created by tools during conversation")
+                    if results:
+                        writing_ids = [row[0] for row in results]
+                        self.logger.info(f"Found {len(writing_ids)} JSON writing(s) created by tools: {writing_ids}")
 
-                        # Link the writing to the prompt
+                        # Link ALL writings to the prompt via junction table
+                        for order, writing_id in enumerate(writing_ids):
+                            # Insert into junction table
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO prompt_writings (prompt_id, writing_id, writing_order)
+                                VALUES (?, ?, ?)
+                            """, (prompt_id, writing_id, order))
+
+                            # Update bidirectional link in writings table
+                            cursor.execute(
+                                "UPDATE writings SET source_prompt_id = ? WHERE id = ?",
+                                (prompt_id, writing_id)
+                            )
+
+                        # Set output_reference to the LAST (most recent) writing for backward compatibility
+                        primary_writing_id = writing_ids[-1]
                         cursor.execute(
                             "UPDATE prompts SET output_reference = ? WHERE id = ?",
-                            (writing_id, prompt_id)
+                            (primary_writing_id, prompt_id)
                         )
-                        cursor.execute(
-                            "UPDATE writings SET source_prompt_id = ? WHERE id = ?",
-                            (prompt_id, writing_id)
-                        )
+
                         conn.commit()
+
+                        self.logger.info(f"Linked {len(writing_ids)} writings to prompt #{prompt_id}, primary: #{primary_writing_id}")
 
                         # Mark as completed with pending artifact status
                         self.update_prompt_status(
@@ -1404,7 +1570,7 @@ AFTER the generate_lyrics_json() tool is successfully called, respond with "TERM
                         )
                         self.logger.info(
                             f"Structured prompt generation completed for #{prompt_id}, "
-                            f"writing #{writing_id}, marked as pending for media generation"
+                            f"{len(writing_ids)} writing(s) saved, marked as pending for media generation"
                         )
                         return True
                     else:
