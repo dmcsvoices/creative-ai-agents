@@ -1022,7 +1022,7 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             agent.register_for_execution()(web_research_tool)
             agent.register_for_execution()(generate_image_json)
             agent.register_for_execution()(generate_lyrics_json)
-            self.logger.info(f"✅ Execution registration complete for {agent_name}")
+            self.logger.info(f"✅ Execution registration complete for {agent_name} (including generate_image_json, generate_lyrics_json)")
             
         elif isinstance(agent, autogen.AssistantAgent):
             # AssistantAgent: Only LLM functions
@@ -1118,7 +1118,7 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
 
             This automatically saves the JSON to the database with proper formatting.""")(generate_lyrics_json)
 
-            self.logger.info(f"✅ LLM registration complete for {agent_name} (including media JSON tools)")
+            self.logger.info(f"✅ LLM registration complete for {agent_name} (including generate_image_json, generate_lyrics_json, web_research_tool)")
             
         else:
             self.logger.warning(f"⚠️ Unknown agent type for {agent_name}: {type(agent).__name__}")
@@ -1263,22 +1263,71 @@ This is the ONLY correct way to complete lyrics_prompt tasks."""
             # Build enhanced prompt with metadata
             enhanced_prompt = prompt_text
             metadata = prompt_data.get('metadata', {})
-            
+
             # Add style/tone/length hints for the AI agents
             metadata_hints = []
             if metadata.get('style'): metadata_hints.append(f"Style: {metadata['style']}")
-            if metadata.get('tone'): metadata_hints.append(f"Tone: {metadata['tone']}")  
+            if metadata.get('tone'): metadata_hints.append(f"Tone: {metadata['tone']}")
             if metadata.get('length'): metadata_hints.append(f"Length: {metadata['length']}")
             if metadata.get('collaboration_mode') and metadata['collaboration_mode'] != 'standard':
                 metadata_hints.append(f"Mode: {metadata['collaboration_mode']}")
-            
+
             if metadata_hints:
                 enhanced_prompt += f" ({', '.join(metadata_hints)})"
+
+            # Add explicit tool usage reminder for media prompts
+            if prompt_type == 'image_prompt':
+                enhanced_prompt += "\n\n🎨 REMINDER: When your discussion is complete, use the generate_image_json() tool to save the final image prompt as properly formatted JSON. DO NOT output raw JSON text in the conversation."
+            elif prompt_type == 'lyrics_prompt':
+                enhanced_prompt += "\n\n🎵 REMINDER: When you've written the lyrics, use the generate_lyrics_json() tool to save the final song as properly formatted JSON. DO NOT output raw JSON text in the conversation."
             
-            # Setup group chat
+            # Setup group chat with explicit initial instruction
+            if prompt_type == 'image_prompt':
+                initial_message = f"""Task: {enhanced_prompt}
+
+MANDATORY REQUIREMENT: You MUST complete this task by calling the generate_image_json() function.
+After discussing and refining the image concept, ONE of you must call:
+
+generate_image_json(
+    prompt="your detailed image description",
+    negative_prompt="things to avoid",
+    style_tags=["style1", "style2"],
+    mood="mood description",
+    subject="main subject",
+    background="background setting",
+    lighting="lighting description"
+)
+
+This is the ONLY way to successfully complete this task. Do NOT output JSON as text."""
+
+            elif prompt_type == 'lyrics_prompt':
+                initial_message = f"""Task: {enhanced_prompt}
+
+MANDATORY REQUIREMENT: You MUST complete this task by calling the generate_lyrics_json() function.
+After writing the lyrics and deciding on the musical direction, ONE of you must call:
+
+generate_lyrics_json(
+    title="Song Title",
+    genre="music genre",
+    mood="emotional mood",
+    tempo="slow/medium/fast",
+    structure=[
+        {{"type": "verse", "number": 1, "lyrics": "verse 1 text..."}},
+        {{"type": "chorus", "lyrics": "chorus text..."}},
+        {{"type": "verse", "number": 2, "lyrics": "verse 2 text..."}}
+    ],
+    vocal_style="vocal description",
+    instrumentation=["instrument1", "instrument2"]
+)
+
+This is the ONLY way to successfully complete this task. Do NOT output JSON as text."""
+
+            else:
+                initial_message = f"Create {prompt_type} content based on this prompt: {enhanced_prompt}"
+
             groupchat = autogen.GroupChat(
                 agents=agents,
-                messages=[f"Create {prompt_type} content based on this prompt: {enhanced_prompt}"],
+                messages=[initial_message],
                 max_round=self.config['processing'].get('max_rounds', 20)
             )
             
