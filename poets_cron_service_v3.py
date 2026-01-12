@@ -1490,18 +1490,15 @@ AFTER the generate_lyrics_json() tool is successfully called, respond with "TERM
                 conn = self.get_database_connection()
                 try:
                     cursor = conn.cursor()
-                    # Look for recently created writings with this prompt type
-                    # Use conversation duration + buffer instead of fixed 5 minutes
-                    # max_processing_time_minutes is 15, add 5 minute buffer = 20 minutes
-                    time_window_minutes = self.config['processing'].get('max_processing_time_minutes', 15) + 5
-
+                    # Look for writings created for this prompt
+                    # Search by notes field which contains "Prompt #<id>"
+                    # No time window needed - just match by prompt ID in notes
                     cursor.execute(
                         """SELECT id, content FROM writings
                            WHERE content_type = ?
-                           AND created_date >= datetime('now', ? || ' minutes')
                            AND notes LIKE ?
                            ORDER BY id ASC""",
-                        (prompt_type, f'-{time_window_minutes}', f"%Prompt #{prompt_id}%")
+                        (prompt_type, f"%Prompt #{prompt_id}%")
                     )
                     results = cursor.fetchall()
 
