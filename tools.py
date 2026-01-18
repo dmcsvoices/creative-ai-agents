@@ -162,15 +162,22 @@ def save_to_sqlite_database(
             
             writing_id = cursor.lastrowid
             
-            # Add to full-text search (if FTS table exists)
+            # Add to full-text search with specific error handling
             try:
                 cursor.execute("""
-                    INSERT INTO writings_fts(rowid, title, content, notes) 
+                    INSERT INTO writings_fts(rowid, title, content, notes)
                     VALUES (?, ?, ?, ?)
                 """, (writing_id, final_title, content, final_notes))
-            except sqlite3.OperationalError:
-                # FTS table might not exist, that's okay
-                pass
+            except sqlite3.OperationalError as e:
+                error_msg = str(e).lower()
+                # Only ignore "no such table" errors (FTS table doesn't exist)
+                if "no such table" in error_msg or "writings_fts" in error_msg:
+                    # Expected - FTS table is optional
+                    pass
+                else:
+                    # Other operational errors (corruption, constraints) should trigger rollback
+                    print(f"⚠️ FTS insertion failed for writing #{writing_id}: {e}")
+                    raise  # Re-raise to trigger transaction rollback
             
             # Add tags
             tag_count = 0
